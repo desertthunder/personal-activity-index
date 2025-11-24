@@ -39,3 +39,9 @@ base_url = "https://desertthunder.leaflet.pub"
 enabled = true
 id = "stormlightlabs"
 base_url = "https://stormlightlabs.leaflet.pub"
+
+# BearBlog publications (can have multiple)
+[[sources.bearblog]]
+enabled = true
+id = "desertthunder"
+base_url = "https://desertthunder.bearblog.dev"

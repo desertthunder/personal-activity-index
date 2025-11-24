@@ -5,7 +5,7 @@ use std::path::Path;
 use std::{fmt, str::FromStr};
 use thiserror::Error;
 
-pub use fetchers::{BlueskyFetcher, LeafletFetcher, SubstackFetcher};
+pub use fetchers::{BearBlogFetcher, BlueskyFetcher, LeafletFetcher, SubstackFetcher};
 
 /// Errors that can occur in the Personal Activity Index
 #[derive(Error, Debug)]
@@ -41,6 +41,7 @@ pub enum SourceKind {
     Substack,
     Bluesky,
     Leaflet,
+    BearBlog,
 }
 
 impl fmt::Display for SourceKind {
@@ -49,6 +50,7 @@ impl fmt::Display for SourceKind {
             SourceKind::Substack => write!(f, "substack"),
             SourceKind::Bluesky => write!(f, "bluesky"),
             SourceKind::Leaflet => write!(f, "leaflet"),
+            SourceKind::BearBlog => write!(f, "bearblog"),
         }
     }
 }
@@ -61,6 +63,7 @@ impl std::str::FromStr for SourceKind {
             "substack" => Ok(SourceKind::Substack),
             "bluesky" => Ok(SourceKind::Bluesky),
             "leaflet" => Ok(SourceKind::Leaflet),
+            "bearblog" => Ok(SourceKind::BearBlog),
             _ => Err(PaiError::UnknownSourceKind(s.to_string())),
         }
     }
@@ -146,6 +149,15 @@ pub struct LeafletConfig {
     pub base_url: String,
 }
 
+/// Configuration for a single BearBlog publication
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BearBlogConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    pub id: String,
+    pub base_url: String,
+}
+
 /// Database configuration
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct DatabaseConfig {
@@ -175,6 +187,8 @@ pub struct SourcesConfig {
     pub bluesky: Option<BlueskyConfig>,
     #[serde(default)]
     pub leaflet: Vec<LeafletConfig>,
+    #[serde(default)]
+    pub bearblog: Vec<BearBlogConfig>,
 }
 
 /// Configuration for all sources
@@ -273,6 +287,24 @@ pub fn sync_all_sources(
         }
     }
 
+    for bearblog_config in &config.sources.bearblog {
+        if !bearblog_config.enabled {
+            continue;
+        }
+
+        let should_sync = match (kind, source_id) {
+            (Some(k), _) if k != SourceKind::BearBlog => false,
+            (_, Some(sid)) => bearblog_config.id == sid,
+            _ => true,
+        };
+
+        if should_sync {
+            let fetcher = BearBlogFetcher::new(bearblog_config.clone());
+            fetcher.sync(storage)?;
+            synced_count += 1;
+        }
+    }
+
     Ok(synced_count)
 }
 
@@ -285,6 +317,7 @@ mod tests {
         assert_eq!(SourceKind::Substack.to_string(), "substack");
         assert_eq!(SourceKind::Bluesky.to_string(), "bluesky");
         assert_eq!(SourceKind::Leaflet.to_string(), "leaflet");
+        assert_eq!(SourceKind::BearBlog.to_string(), "bearblog");
     }
 
     #[test]
@@ -292,6 +325,8 @@ mod tests {
         assert_eq!("substack".parse::<SourceKind>().unwrap(), SourceKind::Substack);
         assert_eq!("BLUESKY".parse::<SourceKind>().unwrap(), SourceKind::Bluesky);
         assert_eq!("Leaflet".parse::<SourceKind>().unwrap(), SourceKind::Leaflet);
+        assert_eq!("bearblog".parse::<SourceKind>().unwrap(), SourceKind::BearBlog);
+        assert_eq!("BEARBLOG".parse::<SourceKind>().unwrap(), SourceKind::BearBlog);
         assert!("invalid".parse::<SourceKind>().is_err());
     }
 

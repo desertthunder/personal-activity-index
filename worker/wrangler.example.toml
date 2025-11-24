@@ -32,5 +32,9 @@ BLUESKY_HANDLE = "desertthunder.dev"
 # Format: "id1:https://pub1.leaflet.pub,id2:https://pub2.leaflet.pub"
 LEAFLET_URLS = "desertthunder:https://desertthunder.leaflet.pub,stormlightlabs:https://stormlightlabs.leaflet.pub"
 
+# BearBlog publications (comma-separated id:url pairs)
+# Format: "id1:https://blog1.bearblog.dev,id2:https://blog2.bearblog.dev"
+BEARBLOG_URLS = "desertthunder:https://desertthunder.bearblog.dev"
+
 # Optional: Logging level
 # LOG_LEVEL = "info"

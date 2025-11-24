@@ -271,6 +271,25 @@ Common schedules:
 - `0 */6 * * *` - Every 6 hours
 - `0 0 * * *` - Daily at midnight
 
+### Environment Variables
+
+Configure sources in `wrangler.toml` under `[vars]`:
+
+```toml
+[vars]
+# Substack RSS feed URL
+SUBSTACK_URL = "https://patternmatched.substack.com"
+
+# Bluesky handle
+BLUESKY_HANDLE = "desertthunder.dev"
+
+# Leaflet publications (comma-separated id:url pairs)
+LEAFLET_URLS = "desertthunder:https://desertthunder.leaflet.pub,stormlightlabs:https://stormlightlabs.leaflet.pub"
+
+# BearBlog publications (comma-separated id:url pairs)
+BEARBLOG_URLS = "desertthunder:https://desertthunder.bearblog.dev"
+```
+
 ### API Endpoints
 
 The Worker exposes the same API as the self-hosted server:

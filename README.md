@@ -2,7 +2,7 @@
 
 # Personal Activity Index
 
-A CLI that ingests content from Substack, Bluesky, and Leaflet into SQLite, with an optional Cloudflare Worker + D1 deployment path.
+A CLI that ingests content from Substack, Bluesky, Leaflet, and BearBlog into SQLite, with an optional Cloudflare Worker + D1 deployment path.
 
 ## Features
 
@@ -10,6 +10,7 @@ A CLI that ingests content from Substack, Bluesky, and Leaflet into SQLite, with
     - **Substack** via RSS feeds
     - **Bluesky** via AT Protocol
     - **Leaflet** publications via RSS feeds
+    - **BearBlog** publications via RSS feeds
 - Local SQLite storage with full-text search
 - Flexible filtering and querying via `pai list` / `pai export`
 - Self-hostable HTTP API (`pai serve` exposes `/api/feed`, `/api/item/{id}`, and `/status`)
@@ -222,6 +223,60 @@ base_url = "https://stormlightlabs.leaflet.pub"
     <title>Dev Log: 2025-11-22</title>
     <link>https://desertthunder.leaflet.pub/3m6a7fuk7u22p</link>
     <guid>https://desertthunder.leaflet.pub/3m6a7fuk7u22p</guid>
+    <pubDate>Fri, 22 Nov 2025 16:22:54 +0000</pubDate>
+    <description>Post summary or excerpt</description>
+</item>
+```
+
+### BearBlog (RSS)
+
+#### Overview
+
+BearBlog is a minimalist blogging platform that provides RSS feeds at `{slug}.bearblog.dev/feed/`, making them straightforward to fetch using standard RSS parsing.
+
+**Implementation:**
+
+- Fetches RSS feed using `feed-rs` parser
+- Maps RSS `<item>` elements to standardized `Item` struct
+- Supports multiple blogs via config array
+- Uses entry ID from feed, falls back to link if missing
+- Normalizes publication dates to ISO 8601 format
+
+**Key mappings:**
+
+- `id` = RSS entry ID or link
+- `source_kind` = `bearblog`
+- `source_id` = Blog ID from config (e.g., `desertthunder`)
+- `title` = RSS entry title
+- `summary` = RSS entry summary/description
+- `url` = RSS entry link
+- `content_html` = RSS content body (if available)
+- `author` = RSS entry author
+- `published_at` = RSS published date or updated date (normalized to ISO 8601)
+
+**Configuration:**
+
+BearBlog supports multiple blogs through array configuration:
+
+```toml
+[[sources.bearblog]]
+enabled = true
+id = "desertthunder"
+base_url = "https://desertthunder.bearblog.dev"
+
+[[sources.bearblog]]
+enabled = true
+id = "another-blog"
+base_url = "https://another-blog.bearblog.dev"
+```
+
+**Example RSS structure:**
+
+```xml
+<item>
+    <title>My Blog Post</title>
+    <link>https://desertthunder.bearblog.dev/my-blog-post</link>
+    <guid>https://desertthunder.bearblog.dev/my-blog-post</guid>
     <pubDate>Fri, 22 Nov 2025 16:22:54 +0000</pubDate>
     <description>Post summary or excerpt</description>
 </item>

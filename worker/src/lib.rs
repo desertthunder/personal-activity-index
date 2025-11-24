@@ -8,6 +8,7 @@ struct SyncConfig {
     substack: Option<SubstackConfig>,
     bluesky: Option<BlueskyConfig>,
     leaflet: Vec<LeafletConfig>,
+    bearblog: Vec<BearBlogConfig>,
 }
 
 #[derive(Deserialize)]
@@ -22,6 +23,12 @@ struct BlueskyConfig {
 
 #[derive(Deserialize)]
 struct LeafletConfig {
+    id: String,
+    base_url: String,
+}
+
+#[derive(Deserialize)]
+struct BearBlogConfig {
     id: String,
     base_url: String,
 }
@@ -187,6 +194,16 @@ async fn run_sync(env: &Env) -> Result<()> {
         }
     }
 
+    for bearblog_config in config.bearblog {
+        match sync_bearblog(&bearblog_config, &db).await {
+            Ok(count) => {
+                console_log!("Synced {} items from BearBlog ({})", count, bearblog_config.id);
+                synced += count;
+            }
+            Err(e) => console_error!("BearBlog sync failed for {}: {}", bearblog_config.id, e),
+        }
+    }
+
     console_log!("Sync completed: {} total items", synced);
     Ok(())
 }
@@ -218,7 +235,23 @@ fn load_sync_config(env: &Env) -> Result<SyncConfig> {
         Vec::new()
     };
 
-    Ok(SyncConfig { substack, bluesky, leaflet })
+    let bearblog = if let Ok(urls) = env.var("BEARBLOG_URLS") {
+        urls.to_string()
+            .split(',')
+            .filter_map(|entry| {
+                let parts: Vec<&str> = entry.trim().splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    Some(BearBlogConfig { id: parts[0].to_string(), base_url: parts[1].to_string() })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    Ok(SyncConfig { substack, bluesky, leaflet, bearblog })
 }
 
 async fn sync_substack(config: &SubstackConfig, db: &D1Database) -> Result<usize> {
@@ -414,6 +447,62 @@ async fn sync_leaflet(config: &LeafletConfig, db: &D1Database) -> Result<usize> 
     Ok(count)
 }
 
+async fn sync_bearblog(config: &BearBlogConfig, db: &D1Database) -> Result<usize> {
+    let feed_url = format!("{}/feed/", config.base_url.trim_end_matches('/'));
+
+    let mut req = Request::new(&feed_url, Method::Get)?;
+    req.headers_mut()?.set("User-Agent", "pai-worker/0.1.0")?;
+
+    let mut resp = Fetch::Request(req).send().await?;
+    let body = resp.text().await?;
+
+    let channel =
+        rss::Channel::read_from(body.as_bytes()).map_err(|e| Error::RustError(format!("Failed to parse RSS: {e}")))?;
+
+    let mut count = 0;
+
+    for item in channel.items() {
+        let id = item.guid().map(|g| g.value()).unwrap_or(item.link().unwrap_or(""));
+        let url = item.link().unwrap_or(id);
+        let title = item.title();
+        let summary = item.description();
+        let author = item.author();
+        let content_html = item.content();
+
+        let published_at = item
+            .pub_date()
+            .and_then(|s| chrono::DateTime::parse_from_rfc2822(s).ok())
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+
+        let created_at = chrono::Utc::now().to_rfc3339();
+
+        let stmt = db.prepare(
+            "INSERT OR REPLACE INTO items (id, source_kind, source_id, author, title, summary, url, content_html, published_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+        );
+
+        stmt.bind(&[
+            id.into(),
+            "bearblog".into(),
+            config.id.clone().into(),
+            author.map(|s| s.into()).unwrap_or(JsValue::NULL),
+            title.map(|s| s.into()).unwrap_or(JsValue::NULL),
+            summary.map(|s| s.into()).unwrap_or(JsValue::NULL),
+            url.into(),
+            content_html.map(|s| s.into()).unwrap_or(JsValue::NULL),
+            published_at.into(),
+            created_at.into(),
+        ])?
+        .run()
+        .await?;
+
+        count += 1;
+    }
+
+    Ok(count)
+}
+
 fn normalize_source_id(base_url: &str) -> String {
     base_url
         .trim_start_matches("https://")
@@ -580,5 +669,43 @@ mod tests {
             api_url,
             "https://public.api.bsky.app/xrpc/com.atproto.repo.listRecords?repo=desertthunder.bsky.social&collection=pub.leaflet.post&limit=50"
         );
+    }
+
+    #[test]
+    fn test_bearblog_feed_url_construction() {
+        let base_url = "https://desertthunder.bearblog.dev";
+        let feed_url = format!("{}/feed/", base_url.trim_end_matches('/'));
+        assert_eq!(feed_url, "https://desertthunder.bearblog.dev/feed/");
+    }
+
+    #[test]
+    fn test_bearblog_config_parsing() {
+        let entry = "desertthunder:https://desertthunder.bearblog.dev";
+        let parts: Vec<&str> = entry.trim().splitn(2, ':').collect();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], "desertthunder");
+        assert_eq!(parts[1], "https://desertthunder.bearblog.dev");
+    }
+
+    #[test]
+    fn test_bearblog_config_parsing_multiple() {
+        let urls = "id1:https://blog1.bearblog.dev,id2:https://blog2.bearblog.dev";
+        let configs: Vec<_> = urls
+            .split(',')
+            .filter_map(|entry| {
+                let parts: Vec<&str> = entry.trim().splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    Some((parts[0].to_string(), parts[1].to_string()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[0].0, "id1");
+        assert_eq!(configs[0].1, "https://blog1.bearblog.dev");
+        assert_eq!(configs[1].0, "id2");
+        assert_eq!(configs[1].1, "https://blog2.bearblog.dev");
     }
 }

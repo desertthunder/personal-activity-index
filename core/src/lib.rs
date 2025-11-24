@@ -13,6 +13,9 @@ pub enum PaiError {
     #[error("Unknown source kind: {0}")]
     UnknownSourceKind(String),
 
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(String),
+
     #[error("Storage error: {0}")]
     Storage(String),
 
@@ -64,7 +67,7 @@ impl std::str::FromStr for SourceKind {
 }
 
 /// Represents a single content item from any source
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Item {
     /// Unique identifier for the item
     pub id: String,

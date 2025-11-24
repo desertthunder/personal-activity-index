@@ -918,6 +918,7 @@ dependencies = [
  "owo-colors",
  "pai-core",
  "rusqlite",
+ "serde_json",
 ]
 
 [[package]]

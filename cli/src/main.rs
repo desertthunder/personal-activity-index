@@ -1,10 +1,14 @@
 mod paths;
 mod storage;
 
+use chrono::{DateTime, Duration, Utc};
 use clap::{Parser, Subcommand};
 use owo_colors::OwoColorize;
-use pai_core::{Config, ListFilter, PaiError, SourceKind};
+use pai_core::{Config, Item, ListFilter, PaiError, SourceKind};
+use std::fs::File;
+use std::io::{self, Write};
 use std::path::PathBuf;
+use std::str::FromStr;
 use storage::SqliteStorage;
 
 /// Personal Activity Index - POSIX-style CLI for content aggregation
@@ -53,18 +57,6 @@ struct ExportOpts {
     /// Output file (default: stdout)
     #[arg(short = 'o', value_name = "FILE")]
     output: Option<PathBuf>,
-}
-
-impl From<ExportOpts> for ListFilter {
-    fn from(opts: ExportOpts) -> Self {
-        ListFilter {
-            source_kind: opts.kind,
-            source_id: opts.source_id,
-            limit: opts.limit,
-            since: opts.since,
-            query: opts.query,
-        }
-    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -186,6 +178,11 @@ fn handle_list(
     let db_path = paths::resolve_db_path(db_path)?;
     let storage = SqliteStorage::new(db_path)?;
 
+    let since = normalize_since_input(since)?;
+    let limit = ensure_positive_limit(limit)?;
+    let source_id = normalize_optional_string(source_id);
+    let query = normalize_optional_string(query);
+
     let filter = ListFilter { source_kind: kind, source_id, limit: Some(limit), since, query };
 
     let items = pai_core::Storage::list_items(&storage, &filter)?;
@@ -195,38 +192,40 @@ fn handle_list(
         return Ok(());
     }
 
-    println!("{} {}\n", "Found".cyan(), format!("{} items:", items.len()).bold());
-    for item in items {
-        println!("{} {}", "ID:".bright_black(), item.id);
-        println!(
-            "{} {} {}",
-            "Source:".bright_black(),
-            item.source_kind.to_string().cyan(),
-            format!("({})", item.source_id).bright_black()
-        );
-        if let Some(title) = &item.title {
-            println!("{} {}", "Title:".bright_black(), title.bold());
-        }
-        if let Some(author) = &item.author {
-            println!("{} {}", "Author:".bright_black(), author);
-        }
-        println!("{} {}", "URL:".bright_black(), item.url.blue().underline());
-        println!("{} {}", "Published:".bright_black(), item.published_at);
-        println!();
-    }
+    println!("{} {}", "Found".cyan(), format!("{} item(s)", items.len()).bold());
+    println!();
+    render_items_table(&items)?;
 
     Ok(())
 }
 
 fn handle_export(db_path: Option<PathBuf>, opts: ExportOpts) -> Result<(), PaiError> {
     let db_path = paths::resolve_db_path(db_path)?;
-    let _storage = SqliteStorage::new(db_path)?;
+    let storage = SqliteStorage::new(db_path)?;
 
-    let format = opts.format.clone();
-    let output = opts.output.clone();
-    let filter: ListFilter = opts.into();
+    let ExportOpts { kind, source_id, limit, since, query, format, output } = opts;
+    let since = normalize_since_input(since)?;
+    let limit = ensure_optional_limit(limit)?;
+    let source_id = normalize_optional_string(source_id);
+    let query = normalize_optional_string(query);
 
-    println!("export command - format: {format}, output: {output:?}, filter: {filter:?}");
+    let filter = ListFilter { source_kind: kind, source_id, limit, since, query };
+    let items = pai_core::Storage::list_items(&storage, &filter)?;
+
+    let export_format = ExportFormat::from_str(&format)?;
+    let mut writer = create_output_writer(output.as_ref())?;
+    export_items(&items, export_format, writer.as_mut())?;
+
+    match output {
+        Some(path) => println!(
+            "{} Exported {} item(s) to {}",
+            "Success:".green(),
+            items.len(),
+            path.display()
+        ),
+        None => println!("{} Exported {} item(s) to stdout", "Success:".green(), items.len()),
+    }
+
     Ok(())
 }
 
@@ -298,4 +297,364 @@ fn handle_init(config_dir: Option<PathBuf>, force: bool) -> Result<(), PaiError>
     println!("     {}", "pai list -n 10".bright_black());
 
     Ok(())
+}
+
+fn normalize_since_input(since: Option<String>) -> Result<Option<String>, PaiError> {
+    normalize_since_with_now(since, Utc::now())
+}
+
+fn normalize_since_with_now(since: Option<String>, now: DateTime<Utc>) -> Result<Option<String>, PaiError> {
+    let value = match since {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            trimmed.to_string()
+        }
+        None => return Ok(None),
+    };
+
+    if let Some(duration) = parse_relative_duration(&value) {
+        let instant = now - duration;
+        return Ok(Some(instant.to_rfc3339()));
+    }
+
+    if let Ok(dt) = DateTime::parse_from_rfc3339(&value) {
+        return Ok(Some(dt.with_timezone(&Utc).to_rfc3339()));
+    }
+
+    if let Ok(dt) = DateTime::parse_from_rfc2822(&value) {
+        return Ok(Some(dt.with_timezone(&Utc).to_rfc3339()));
+    }
+
+    Err(PaiError::InvalidArgument(format!(
+        "Invalid since value '{value}'. Use ISO 8601 (e.g. 2024-01-01T00:00:00Z) or relative forms like 7d/24h/60m."
+    )))
+}
+
+fn parse_relative_duration(input: &str) -> Option<Duration> {
+    if input.len() < 2 {
+        return None;
+    }
+
+    let unit = input.chars().last()?.to_ascii_lowercase();
+    let magnitude: i64 = input[..input.len() - 1].parse().ok()?;
+
+    match unit {
+        'm' => Some(Duration::minutes(magnitude)),
+        'h' => Some(Duration::hours(magnitude)),
+        'd' => Some(Duration::days(magnitude)),
+        'w' => Some(Duration::weeks(magnitude)),
+        _ => None,
+    }
+}
+
+fn ensure_positive_limit(limit: usize) -> Result<usize, PaiError> {
+    if limit == 0 {
+        return Err(PaiError::InvalidArgument("Limit must be greater than zero".to_string()));
+    }
+    Ok(limit)
+}
+
+fn ensure_optional_limit(limit: Option<usize>) -> Result<Option<usize>, PaiError> {
+    match limit {
+        Some(value) => Ok(Some(ensure_positive_limit(value)?)),
+        None => Ok(None),
+    }
+}
+
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value.and_then(|input| {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+enum ExportFormat {
+    Json,
+    Ndjson,
+    Rss,
+}
+
+impl FromStr for ExportFormat {
+    type Err = PaiError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "json" => Ok(Self::Json),
+            "ndjson" => Ok(Self::Ndjson),
+            "rss" => Ok(Self::Rss),
+            other => Err(PaiError::InvalidArgument(format!(
+                "Unsupported export format '{other}'. Expected json, ndjson, or rss."
+            ))),
+        }
+    }
+}
+
+fn create_output_writer(path: Option<&PathBuf>) -> Result<Box<dyn Write>, PaiError> {
+    if let Some(path) = path {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let file = File::create(path)?;
+        Ok(Box::new(file))
+    } else {
+        Ok(Box::new(io::stdout()))
+    }
+}
+
+fn export_items(items: &[Item], format: ExportFormat, writer: &mut dyn Write) -> Result<(), PaiError> {
+    match format {
+        ExportFormat::Json => write_json(items, writer)?,
+        ExportFormat::Ndjson => write_ndjson(items, writer)?,
+        ExportFormat::Rss => write_rss(items, writer)?,
+    }
+
+    writer.flush().map_err(PaiError::Io)
+}
+
+fn write_json(items: &[Item], writer: &mut dyn Write) -> Result<(), PaiError> {
+    serde_json::to_writer_pretty(&mut *writer, items)
+        .map_err(|e| PaiError::Parse(format!("Failed to serialize JSON export: {e}")))?;
+    writer.write_all(b"\n").map_err(PaiError::Io)
+}
+
+fn write_ndjson(items: &[Item], writer: &mut dyn Write) -> Result<(), PaiError> {
+    for item in items {
+        serde_json::to_writer(&mut *writer, item)
+            .map_err(|e| PaiError::Parse(format!("Failed to serialize JSON export: {e}")))?;
+        writer.write_all(b"\n").map_err(PaiError::Io)?;
+    }
+    Ok(())
+}
+
+fn write_rss(items: &[Item], writer: &mut dyn Write) -> Result<(), PaiError> {
+    let feed = build_rss_feed(items)?;
+    writer.write_all(feed.as_bytes()).map_err(PaiError::Io)?;
+    writer.write_all(b"\n").map_err(PaiError::Io)
+}
+
+fn build_rss_feed(items: &[Item]) -> Result<String, PaiError> {
+    const TITLE: &str = "Personal Activity Index";
+    const LINK: &str = "https://personal-activity-index.local/";
+    const DESCRIPTION: &str = "Aggregated feed exported by the Personal Activity Index CLI.";
+
+    let mut feed = String::new();
+    feed.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+    feed.push_str("<rss version=\"2.0\"><channel>");
+    feed.push_str(&format!("<title>{TITLE}</title>"));
+    feed.push_str(&format!("<link>{LINK}</link>"));
+    feed.push_str(&format!("<description>{DESCRIPTION}</description>"));
+
+    for item in items {
+        let title = item.title.as_deref().or(item.summary.as_deref()).unwrap_or(&item.url);
+        let description = item.summary.as_deref().or(item.content_html.as_deref()).unwrap_or("");
+        let author = item.author.as_deref().unwrap_or("Unknown");
+
+        feed.push_str("<item>");
+        feed.push_str(&format!("<title>{}</title>", escape_xml(title)));
+        feed.push_str(&format!("<link>{}</link>", escape_xml(&item.url)));
+        feed.push_str(&format!("<guid isPermaLink=\"false\">{}</guid>", escape_xml(&item.id)));
+        feed.push_str(&format!(
+            "<category>{}</category>",
+            escape_xml(&item.source_kind.to_string())
+        ));
+        feed.push_str(&format!("<author>{}</author>", escape_xml(author)));
+        feed.push_str(&format!("<description>{}</description>", escape_xml(description)));
+        feed.push_str(&format!("<pubDate>{}</pubDate>", format_rss_date(&item.published_at)));
+        feed.push_str("</item>");
+    }
+
+    feed.push_str("</channel></rss>");
+    Ok(feed)
+}
+
+fn escape_xml(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('\"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn format_rss_date(value: &str) -> String {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
+        dt.to_rfc2822()
+    } else if let Ok(dt) = DateTime::parse_from_rfc2822(value) {
+        dt.to_rfc2822()
+    } else {
+        value.to_string()
+    }
+}
+
+fn format_published_display(value: &str) -> String {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
+        dt.with_timezone(&Utc).format("%Y-%m-%d %H:%M").to_string()
+    } else if let Ok(dt) = DateTime::parse_from_rfc2822(value) {
+        dt.with_timezone(&Utc).format("%Y-%m-%d %H:%M").to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn truncate_for_column(value: &str, max_chars: usize) -> String {
+    let total_chars = value.chars().count();
+    if total_chars <= max_chars {
+        return value.to_string();
+    }
+
+    if max_chars <= 3 {
+        return value.chars().take(max_chars).collect();
+    }
+
+    let mut truncated = String::new();
+    for ch in value.chars().take(max_chars - 3) {
+        truncated.push(ch);
+    }
+    truncated.push_str("...");
+    truncated
+}
+
+fn render_items_table(items: &[Item]) -> Result<(), PaiError> {
+    let mut stdout = io::stdout();
+    write_items_table(items, &mut stdout).map_err(PaiError::Io)
+}
+
+fn write_items_table<W: Write>(items: &[Item], writer: &mut W) -> io::Result<()> {
+    const PUBLISHED_WIDTH: usize = 19;
+    const KIND_WIDTH: usize = 9;
+    const SOURCE_WIDTH: usize = 24;
+    const TITLE_WIDTH: usize = 60;
+
+    let header = format!(
+        "| {published:<pub_width$} | {kind:<kind_width$} | {source:<source_width$} | {title:<title_width$} |",
+        published = "Published",
+        kind = "Kind",
+        source = "Source",
+        title = "Title",
+        pub_width = PUBLISHED_WIDTH,
+        kind_width = KIND_WIDTH,
+        source_width = SOURCE_WIDTH,
+        title_width = TITLE_WIDTH,
+    );
+    let separator = "-".repeat(header.len());
+
+    writeln!(writer, "{separator}")?;
+    writeln!(writer, "{header}")?;
+    writeln!(writer, "{}", separator.clone())?;
+
+    for item in items {
+        let published = truncate_for_column(&format_published_display(&item.published_at), PUBLISHED_WIDTH);
+        let kind = truncate_for_column(&item.source_kind.to_string(), KIND_WIDTH);
+        let source = truncate_for_column(&item.source_id, SOURCE_WIDTH);
+        let title_text = item.title.as_deref().or(item.summary.as_deref()).unwrap_or(&item.url);
+        let title = truncate_for_column(title_text, TITLE_WIDTH);
+
+        let row = format!(
+            "| {published:<PUBLISHED_WIDTH$} | {kind:<KIND_WIDTH$} | {source:<SOURCE_WIDTH$} | {title:<TITLE_WIDTH$} |",
+        );
+        writeln!(writer, "{row}")?;
+    }
+
+    writeln!(writer, "{separator}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn sample_item() -> Item {
+        Item {
+            id: "sample-id".to_string(),
+            source_kind: SourceKind::Substack,
+            source_id: "patternmatched.substack.com".to_string(),
+            author: Some("Pattern Matched".to_string()),
+            title: Some("Test entry".to_string()),
+            summary: Some("Summary".to_string()),
+            url: "https://patternmatched.substack.com/p/test".to_string(),
+            content_html: None,
+            published_at: "2024-01-01T00:00:00Z".to_string(),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn normalize_since_accepts_iso8601() {
+        let now = Utc.with_ymd_and_hms(2024, 1, 10, 0, 0, 0).unwrap();
+        let since = normalize_since_with_now(Some("2024-01-01T00:00:00Z".to_string()), now).unwrap();
+        assert_eq!(since.unwrap(), "2024-01-01T00:00:00+00:00");
+    }
+
+    #[test]
+    fn normalize_since_accepts_relative_days() {
+        let now = Utc.with_ymd_and_hms(2024, 1, 10, 0, 0, 0).unwrap();
+        let since = normalize_since_with_now(Some("3d".to_string()), now).unwrap();
+        assert_eq!(since.unwrap(), "2024-01-07T00:00:00+00:00");
+    }
+
+    #[test]
+    fn ensure_positive_limit_rejects_zero() {
+        assert!(ensure_positive_limit(0).is_err());
+        assert!(ensure_optional_limit(Some(0)).is_err());
+    }
+
+    #[test]
+    fn export_format_parsing() {
+        assert!(matches!(ExportFormat::from_str("json").unwrap(), ExportFormat::Json));
+        assert!(matches!(
+            ExportFormat::from_str("NDJSON").unwrap(),
+            ExportFormat::Ndjson
+        ));
+        assert!(matches!(ExportFormat::from_str("rss").unwrap(), ExportFormat::Rss));
+        assert!(ExportFormat::from_str("invalid").is_err());
+    }
+
+    #[test]
+    fn json_export_serializes_items() {
+        let mut buffer = Vec::new();
+        export_items(&[sample_item()], ExportFormat::Json, &mut buffer).unwrap();
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.trim_start().starts_with('['));
+        assert!(output.contains("sample-id"));
+    }
+
+    #[test]
+    fn ndjson_export_serializes_items() {
+        let mut buffer = Vec::new();
+        export_items(&[sample_item()], ExportFormat::Ndjson, &mut buffer).unwrap();
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.lines().next().unwrap().contains("sample-id"));
+    }
+
+    #[test]
+    fn rss_export_contains_items() {
+        let feed = build_rss_feed(&[sample_item()]).unwrap();
+        assert!(feed.contains("<rss"));
+        assert!(feed.contains("<item>"));
+        assert!(feed.contains("sample-id"));
+    }
+
+    #[test]
+    fn table_writer_emits_rows() {
+        let mut buffer = Vec::new();
+        write_items_table(&[sample_item()], &mut buffer).unwrap();
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.contains("Published"));
+        assert!(output.contains("patternmatched"));
+    }
+
+    #[test]
+    fn truncate_column_adds_ellipsis() {
+        let truncated = truncate_for_column("abcdefghijklmnopqrstuvwxyz", 8);
+        assert_eq!(truncated, "abcde...");
+    }
 }

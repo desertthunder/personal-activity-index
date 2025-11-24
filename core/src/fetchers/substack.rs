@@ -1,6 +1,7 @@
 use crate::{Item, PaiError, Result, SourceFetcher, SourceKind, Storage, SubstackConfig};
 use chrono::Utc;
 use feed_rs::parser;
+use tokio::runtime::Runtime;
 
 /// Fetcher for Substack RSS feeds
 ///
@@ -37,8 +38,11 @@ impl SubstackFetcher {
 
     /// Extracts the source ID from the base URL (e.g., "patternmatched.substack.com")
     fn extract_source_id(&self) -> String {
-        self.config
-            .base_url
+        Self::normalize_source_id(&self.config.base_url)
+    }
+
+    pub(crate) fn normalize_source_id(base_url: &str) -> String {
+        base_url
             .trim_start_matches("https://")
             .trim_start_matches("http://")
             .trim_end_matches('/')
@@ -48,8 +52,7 @@ impl SubstackFetcher {
 
 impl SourceFetcher for SubstackFetcher {
     fn sync(&self, storage: &dyn Storage) -> Result<()> {
-        let runtime =
-            tokio::runtime::Runtime::new().map_err(|e| PaiError::Fetch(format!("Failed to create runtime: {e}")))?;
+        let runtime = Runtime::new().map_err(|e| PaiError::Fetch(format!("Failed to create runtime: {e}")))?;
 
         runtime.block_on(async {
             let feed = self.fetch_feed().await?;
@@ -131,16 +134,18 @@ mod tests {
 
     #[test]
     fn extract_source_id_https() {
-        let config = SubstackConfig { enabled: true, base_url: "https://patternmatched.substack.com".to_string() };
-        let fetcher = SubstackFetcher::new(config);
-        assert_eq!(fetcher.extract_source_id(), "patternmatched.substack.com");
+        assert_eq!(
+            SubstackFetcher::normalize_source_id("https://patternmatched.substack.com"),
+            "patternmatched.substack.com"
+        );
     }
 
     #[test]
     fn extract_source_id_http() {
-        let config = SubstackConfig { enabled: true, base_url: "http://test.substack.com/".to_string() };
-        let fetcher = SubstackFetcher::new(config);
-        assert_eq!(fetcher.extract_source_id(), "test.substack.com");
+        assert_eq!(
+            SubstackFetcher::normalize_source_id("http://test.substack.com/"),
+            "test.substack.com"
+        );
     }
 
     #[test]

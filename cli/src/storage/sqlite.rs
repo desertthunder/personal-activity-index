@@ -135,6 +135,39 @@ impl SqliteStorage {
 
         Ok(())
     }
+
+    /// Fetches a single item by ID, if it exists
+    pub fn get_item(&self, id: &str) -> Result<Option<Item>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, source_kind, source_id, author, title, summary, url, content_html, published_at, created_at
+             FROM items WHERE id = ?1 LIMIT 1",
+            )
+            .map_err(|e| PaiError::Storage(format!("Failed to prepare get_item query: {e}")))?;
+
+        stmt.query_row([id], |row| {
+            let source_kind_str: String = row.get(1)?;
+            let source_kind = source_kind_str
+                .parse::<SourceKind>()
+                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?;
+
+            Ok(Item {
+                id: row.get(0)?,
+                source_kind,
+                source_id: row.get(2)?,
+                author: row.get(3)?,
+                title: row.get(4)?,
+                summary: row.get(5)?,
+                url: row.get(6)?,
+                content_html: row.get(7)?,
+                published_at: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        })
+        .optional()
+        .map_err(|e| PaiError::Storage(format!("Failed to fetch item by id: {e}")))
+    }
 }
 
 impl Storage for SqliteStorage {
@@ -403,5 +436,23 @@ mod tests {
 
         let count = storage.count_items().expect("Failed to count items");
         assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn get_item_returns_record() {
+        let storage = create_test_storage();
+        let item = create_test_item("test-1", SourceKind::Substack, "test.substack.com");
+        storage.insert_or_replace_item(&item).expect("Failed to insert");
+
+        let fetched = storage.get_item("test-1").expect("query failed").unwrap();
+        assert_eq!(fetched.id, "test-1");
+        assert_eq!(fetched.source_kind, SourceKind::Substack);
+    }
+
+    #[test]
+    fn get_item_returns_none_for_missing() {
+        let storage = create_test_storage();
+        let result = storage.get_item("nope").expect("query failed");
+        assert!(result.is_none());
     }
 }

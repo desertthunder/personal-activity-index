@@ -1,4 +1,5 @@
 mod paths;
+mod server;
 mod storage;
 
 use chrono::{DateTime, Duration, Utc};
@@ -231,10 +232,7 @@ fn handle_export(db_path: Option<PathBuf>, opts: ExportOpts) -> Result<(), PaiEr
 
 fn handle_serve(db_path: Option<PathBuf>, address: String) -> Result<(), PaiError> {
     let db_path = paths::resolve_db_path(db_path)?;
-    let _storage = SqliteStorage::new(db_path)?;
-
-    println!("serve command - address: {address}");
-    Ok(())
+    server::serve(db_path, address)
 }
 
 fn handle_db_check(db_path: Option<PathBuf>) -> Result<(), PaiError> {

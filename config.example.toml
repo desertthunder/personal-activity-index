@@ -1,0 +1,41 @@
+# Personal Activity Index Configuration Example
+# Copy this file to your config directory and customize as needed
+#
+# Default config location:
+#   - $XDG_CONFIG_HOME/pai/config.toml
+#   - $HOME/.config/pai/config.toml
+
+[database]
+# Path to SQLite database file (optional, defaults to $XDG_DATA_HOME/pai/pai.db)
+path = "/home/owais/.local/share/pai/pai.db"
+
+[deployment]
+# Deployment mode: "sqlite" for local, "cloudflare" for Workers
+mode = "sqlite"
+
+# Cloudflare deployment configuration (optional, only needed for Workers)
+[deployment.cloudflare]
+worker_name = "personal-activity-index"
+d1_binding = "DB"
+database_name = "personal_activity_db"
+
+# Substack RSS feed source
+[sources.substack]
+enabled = true
+base_url = "https://patternmatched.substack.com"
+
+# Bluesky AT Protocol source
+[sources.bluesky]
+enabled = true
+handle = "desertthunder.dev"
+
+# Leaflet publications (can have multiple)
+[[sources.leaflet]]
+enabled = true
+id = "desertthunder"
+base_url = "https://desertthunder.leaflet.pub"
+
+[[sources.leaflet]]
+enabled = true
+id = "stormlightlabs"
+base_url = "https://stormlightlabs.leaflet.pub"

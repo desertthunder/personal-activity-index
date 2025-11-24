@@ -11,8 +11,9 @@ A CLI that ingests content from Substack, Bluesky, and Leaflet into SQLite, with
     - **Bluesky** via AT Protocol
     - **Leaflet** publications via RSS feeds
 - Local SQLite storage with full-text search
-- Flexible filtering and querying
-- Self-hostable or serverless (Cloudflare Workers)
+- Flexible filtering and querying via `pai list` / `pai export`
+- Self-hostable HTTP API (`pai serve` exposes `/api/feed`, `/api/item/{id}`, and `/status`)
+- Cloudflare Worker deployment path (D1) for serverless setups
 
 ## Quick Start
 
@@ -36,11 +37,36 @@ pai list -n 10
 pai db-check
 ```
 
+<details>
+<summary>For server mode, run the built-in HTTP server against your SQLite database:</summary>
+
+<br>
+
+```bash
+pai serve -d /var/lib/pai/pai.db -a 127.0.0.1:8080
+```
+
+Endpoints:
+
+- `GET /api/feed` – list newest items (supports `source_kind`, `source_id`, `limit`, `since`, `q`)
+- `GET /api/item/{id}` – fetch a single item
+- `GET /status` – health/status summary (total items, counts per source)
+
+For reverse-proxy examples (nginx, Caddy, Docker), see [DEPLOYMENT.md](./DEPLOYMENT.md).
+
+</details>
+
 ## Configuration
 
 Configuration is loaded from `$XDG_CONFIG_HOME/pai/config.toml` or `$HOME/.config/pai/config.toml`.
 
 See [config.example.toml](./config.example.toml) for a complete example with all available options.
+
+## Documentation
+
+- CLI synopsis: `pai -h`, `pai <command> -h`, or `pai man` for the generated `pai(1)` page.
+- Database schema and config reference: [config.example.toml](./config.example.toml).
+- Deployment topologies: [DEPLOYMENT.md](./DEPLOYMENT.md).
 
 ## Architecture
 
@@ -207,4 +233,4 @@ base_url = "https://stormlightlabs.leaflet.pub"
 
 ## License
 
-See [LICENSE file](./LICENSE) for details.
+See [LICENSE](./LICENSE)

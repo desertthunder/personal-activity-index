@@ -1,9 +1,11 @@
+mod app;
 mod paths;
 mod server;
 mod storage;
 
+use app::{Cli, Commands, ExportOpts};
 use chrono::{DateTime, Duration, Utc};
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use owo_colors::OwoColorize;
 use pai_core::{Config, Item, ListFilter, PaiError, SourceKind};
 use std::fs::File;
@@ -12,114 +14,10 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use storage::SqliteStorage;
 
-/// Personal Activity Index - POSIX-style CLI for content aggregation
-#[derive(Parser, Debug)]
-#[command(name = "pai")]
-#[command(version, about, long_about = None)]
-struct Cli {
-    /// Set configuration directory
-    #[arg(short = 'C', value_name = "DIR", global = true)]
-    config_dir: Option<PathBuf>,
-
-    /// Path to SQLite database file
-    #[arg(short = 'd', value_name = "PATH", global = true)]
-    db_path: Option<PathBuf>,
-
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Parser, Debug)]
-struct ExportOpts {
-    /// Filter by source kind
-    #[arg(short = 'k', value_name = "KIND")]
-    kind: Option<SourceKind>,
-
-    /// Filter by specific source ID
-    #[arg(short = 'S', value_name = "ID")]
-    source_id: Option<String>,
-
-    /// Maximum number of items
-    #[arg(short = 'n', value_name = "NUMBER")]
-    limit: Option<usize>,
-
-    /// Only items published at or after this time
-    #[arg(short = 's', value_name = "TIME")]
-    since: Option<String>,
-
-    /// Filter items by substring
-    #[arg(short = 'q', value_name = "PATTERN")]
-    query: Option<String>,
-
-    /// Output format
-    #[arg(short = 'f', value_name = "FORMAT", default_value = "json")]
-    format: String,
-
-    /// Output file (default: stdout)
-    #[arg(short = 'o', value_name = "FILE")]
-    output: Option<PathBuf>,
-}
-
-#[derive(Subcommand, Debug)]
-enum Commands {
-    /// Fetch and store content from configured sources
-    Sync {
-        /// Sync all configured sources (default)
-        #[arg(short = 'a')]
-        all: bool,
-
-        /// Sync only a particular source kind
-        #[arg(short = 'k', value_name = "KIND")]
-        kind: Option<SourceKind>,
-
-        /// Sync only a specific source instance
-        #[arg(short = 'S', value_name = "ID")]
-        source_id: Option<String>,
-    },
-
-    /// Inspect stored items
-    List {
-        /// Filter by source kind
-        #[arg(short = 'k', value_name = "KIND")]
-        kind: Option<SourceKind>,
-
-        /// Filter by specific source ID
-        #[arg(short = 'S', value_name = "ID")]
-        source_id: Option<String>,
-
-        /// Maximum number of items to display
-        #[arg(short = 'n', value_name = "NUMBER", default_value = "20")]
-        limit: usize,
-
-        /// Only show items published at or after this time
-        #[arg(short = 's', value_name = "TIME")]
-        since: Option<String>,
-
-        /// Filter items by substring in title/summary
-        #[arg(short = 'q', value_name = "PATTERN")]
-        query: Option<String>,
-    },
-
-    /// Produce feeds or export files
-    Export(ExportOpts),
-
-    /// Self-host HTTP API
-    Serve {
-        /// Address to bind HTTP server to
-        #[arg(short = 'a', value_name = "ADDRESS", default_value = "127.0.0.1:8080")]
-        address: String,
-    },
-
-    /// Verify database schema and print statistics
-    DbCheck,
-
-    /// Initialize configuration file
-    Init {
-        /// Force overwrite existing config
-        #[arg(short = 'f')]
-        force: bool,
-    },
-}
+const PUBLISHED_WIDTH: usize = 19;
+const KIND_WIDTH: usize = 9;
+const SOURCE_WIDTH: usize = 24;
+const TITLE_WIDTH: usize = 60;
 
 fn main() {
     let cli = Cli::parse();
@@ -527,11 +425,6 @@ fn render_items_table(items: &[Item]) -> Result<(), PaiError> {
 }
 
 fn write_items_table<W: Write>(items: &[Item], writer: &mut W) -> io::Result<()> {
-    const PUBLISHED_WIDTH: usize = 19;
-    const KIND_WIDTH: usize = 9;
-    const SOURCE_WIDTH: usize = 24;
-    const TITLE_WIDTH: usize = 60;
-
     let header = format!(
         "| {published:<pub_width$} | {kind:<kind_width$} | {source:<source_width$} | {title:<title_width$} |",
         published = "Published",

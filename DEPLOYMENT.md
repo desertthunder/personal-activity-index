@@ -160,9 +160,10 @@ Use the same `Caddyfile` contents as above, but point `reverse_proxy` to `pai:80
 
 ## Health Checks & Monitoring
 
-- `GET /api/feed?limit=1` ensures the server can read from SQLite.
+- `GET /status` – lightweight JSON (`status`, total items, counts per `source_kind`). Ideal for load balancer health probes.
+- `GET /api/feed?limit=1` ensures the server can read from SQLite and return real data.
 - `GET /api/item/{id}` is handy for debugging a specific record.
-- Consider adding nginx/Caddy health check endpoints (`/healthz`) that proxy to `/api/feed?limit=1` and monitor via your platform.
+- Consider wiring `/status` into nginx/Caddy health checks (`/healthz`) or your platform’s monitoring agents.
 
 ## Security Tips
 

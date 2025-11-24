@@ -10,6 +10,7 @@ use axum::{
 use owo_colors::OwoColorize;
 use pai_core::{Item, ListFilter, PaiError, SourceKind};
 use serde::{Deserialize, Serialize};
+use std::io;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::net::TcpListener;
 
@@ -30,7 +31,6 @@ pub(crate) fn serve(db_path: PathBuf, address: String) -> Result<(), PaiError> {
 }
 
 async fn run_server(db_path: PathBuf, addr: SocketAddr) -> Result<(), PaiError> {
-    // Ensure the database exists and schema is ready before serving requests.
     let storage = SqliteStorage::new(&db_path)?;
     storage.verify_schema()?;
     drop(storage);
@@ -40,6 +40,7 @@ async fn run_server(db_path: PathBuf, addr: SocketAddr) -> Result<(), PaiError> 
     let app = Router::new()
         .route("/api/feed", get(feed_handler))
         .route("/api/item/:id", get(item_handler))
+        .route("/status", get(status_handler))
         .with_state(state);
 
     let listener = TcpListener::bind(addr).await.map_err(PaiError::Io)?;
@@ -49,7 +50,7 @@ async fn run_server(db_path: PathBuf, addr: SocketAddr) -> Result<(), PaiError> 
     axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .map_err(|err| PaiError::Io(std::io::Error::new(std::io::ErrorKind::Other, err)))
+        .map_err(|e| io::Error::other(e).into())
 }
 
 #[derive(Clone)]
@@ -60,6 +61,18 @@ struct AppState {
 impl AppState {
     fn open_storage(&self) -> Result<SqliteStorage, PaiError> {
         SqliteStorage::new(self.db_path.as_ref())
+    }
+
+    fn status_snapshot(&self) -> Result<StatusResponse, PaiError> {
+        let storage = self.open_storage()?;
+        let total_items = storage.count_items()?;
+        let sources = storage
+            .get_stats()?
+            .into_iter()
+            .map(|(kind, count)| SourceStat { kind, count })
+            .collect();
+
+        Ok(StatusResponse { status: "ok", database_path: self.db_path.display().to_string(), total_items, sources })
     }
 }
 
@@ -95,6 +108,20 @@ struct FeedResponse {
     items: Vec<Item>,
 }
 
+#[derive(Serialize)]
+struct StatusResponse {
+    status: &'static str,
+    database_path: String,
+    total_items: usize,
+    sources: Vec<SourceStat>,
+}
+
+#[derive(Serialize)]
+struct SourceStat {
+    kind: String,
+    count: usize,
+}
+
 async fn feed_handler(
     State(state): State<AppState>, Query(query): Query<FeedQuery>,
 ) -> Result<Json<FeedResponse>, ApiError> {
@@ -112,6 +139,11 @@ async fn item_handler(State(state): State<AppState>, Path(id): Path<String>) -> 
         .ok_or_else(|| ApiError::not_found(format!("Item '{id}' not found")))?;
 
     Ok(Json(item))
+}
+
+async fn status_handler(State(state): State<AppState>) -> Result<Json<StatusResponse>, ApiError> {
+    let snapshot = state.status_snapshot()?;
+    Ok(Json(snapshot))
 }
 
 struct ApiError {
@@ -160,6 +192,9 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use pai_core::Storage;
+    use tempfile::tempdir;
 
     #[test]
     fn feed_query_defaults() {
@@ -199,5 +234,34 @@ mod tests {
     fn api_error_into_response_sets_status() {
         let resp = ApiError::bad_request("oops").into_response();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn status_snapshot_reports_counts() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("status.db");
+        let state = AppState { db_path: Arc::new(db_path.clone()) };
+
+        let storage = state.open_storage().unwrap();
+        let now = Utc::now().to_rfc3339();
+        let item = Item {
+            id: "status-test".to_string(),
+            source_kind: SourceKind::Substack,
+            source_id: "status.substack.com".to_string(),
+            author: None,
+            title: Some("Status".to_string()),
+            summary: None,
+            url: "https://example.com/status".to_string(),
+            content_html: None,
+            published_at: now.clone(),
+            created_at: now,
+        };
+        storage.insert_or_replace_item(&item).unwrap();
+
+        let snapshot = state.status_snapshot().unwrap();
+        assert_eq!(snapshot.status, "ok");
+        assert_eq!(snapshot.total_items, 1);
+        assert_eq!(snapshot.sources.len(), 1);
+        assert_eq!(snapshot.sources[0].kind, "substack");
     }
 }

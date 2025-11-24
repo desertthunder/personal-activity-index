@@ -109,4 +109,31 @@ pub enum Commands {
         #[arg(short = 'f')]
         force: bool,
     },
+
+    /// Generate or install the pai(1) manpage
+    Man {
+        /// Output file (default: stdout)
+        #[arg(short = 'o', value_name = "FILE")]
+        output: Option<PathBuf>,
+
+        /// Install into a manpath directory (defaults to ~/.local/share/man if unset)
+        #[arg(long)]
+        install: bool,
+
+        /// Custom directory for --install (e.g., /usr/local/share/man)
+        #[arg(long, value_name = "DIR")]
+        install_dir: Option<PathBuf>,
+    },
+
+    /// Initialize Cloudflare Worker deployment scaffolding
+    #[command(name = "cf-init")]
+    CfInit {
+        /// Output directory for scaffolding (default: current directory)
+        #[arg(short = 'o', value_name = "DIR")]
+        output_dir: Option<PathBuf>,
+
+        /// Dry run - show what would be created without writing files
+        #[arg(long)]
+        dry_run: bool,
+    },
 }

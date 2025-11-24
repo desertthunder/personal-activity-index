@@ -1,0 +1,4 @@
+# Ignore actual config files (keep only examples in git)
+/nginx.local.conf
+/Caddyfile.local
+*.local.*

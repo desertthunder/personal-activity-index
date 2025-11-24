@@ -1,0 +1,36 @@
+# Cloudflare Workers configuration for Personal Activity Index
+# Copy this file to wrangler.toml and update with your values
+
+name = "personal-activity-index"
+main = "build/worker/index.js"
+compatibility_date = "2025-01-15"
+
+# D1 Database Binding
+# Create your D1 database with:
+#   wrangler d1 create personal-activity-db
+# Then replace {DATABASE_ID} below with the ID from the output
+[[d1_databases]]
+binding = "DB"
+database_name = "personal-activity-db"
+database_id = "{DATABASE_ID}"
+
+# Cron Triggers for scheduled syncs
+# Runs every hour at minute 0
+[triggers]
+crons = ["0 * * * *"]
+
+# Environment variables for source configuration
+# Configure the sources you want to sync
+[vars]
+# Substack RSS feed URL
+SUBSTACK_URL = "https://patternmatched.substack.com"
+
+# Bluesky handle
+BLUESKY_HANDLE = "desertthunder.dev"
+
+# Leaflet publications (comma-separated id:url pairs)
+# Format: "id1:https://pub1.leaflet.pub,id2:https://pub2.leaflet.pub"
+LEAFLET_URLS = "desertthunder:https://desertthunder.leaflet.pub,stormlightlabs:https://stormlightlabs.leaflet.pub"
+
+# Optional: Logging level
+# LOG_LEVEL = "info"

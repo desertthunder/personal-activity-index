@@ -35,6 +35,12 @@ pai list -n 10
 
 # Check database
 pai db-check
+
+# Install the manpage so `man pai` works
+pai man --install
+
+# Generate manpage to a file
+pai man -o pai.1
 ```
 
 <details>
@@ -65,6 +71,7 @@ See [config.example.toml](./config.example.toml) for a complete example with all
 ## Documentation
 
 - CLI synopsis: `pai -h`, `pai <command> -h`, or `pai man` for the generated `pai(1)` page.
+- `pai man --install [--install-dir DIR]` copies `pai.1` into a MANPATH directory (defaults to `~/.local/share/man/man1`) so `man pai` works like any other UNIX tool.
 - Database schema and config reference: [config.example.toml](./config.example.toml).
 - Deployment topologies: [DEPLOYMENT.md](./DEPLOYMENT.md).
 

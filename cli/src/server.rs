@@ -10,11 +10,11 @@ use axum::{
 use owo_colors::OwoColorize;
 use pai_core::{Item, ListFilter, PaiError, SourceKind};
 use serde::{Deserialize, Serialize};
-use std::io;
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{io, net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
 use tokio::net::TcpListener;
 
 const DEFAULT_LIMIT: usize = 20;
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Launches the HTTP server using the provided SQLite database path and address.
 pub(crate) fn serve(db_path: PathBuf, address: String) -> Result<(), PaiError> {
@@ -35,7 +35,7 @@ async fn run_server(db_path: PathBuf, addr: SocketAddr) -> Result<(), PaiError> 
     storage.verify_schema()?;
     drop(storage);
 
-    let state = AppState { db_path: Arc::new(db_path) };
+    let state = AppState { db_path: Arc::new(db_path), start_time: Instant::now() };
 
     let app = Router::new()
         .route("/api/feed", get(feed_handler))
@@ -56,6 +56,7 @@ async fn run_server(db_path: PathBuf, addr: SocketAddr) -> Result<(), PaiError> 
 #[derive(Clone)]
 struct AppState {
     db_path: Arc<PathBuf>,
+    start_time: Instant,
 }
 
 impl AppState {
@@ -72,7 +73,14 @@ impl AppState {
             .map(|(kind, count)| SourceStat { kind, count })
             .collect();
 
-        Ok(StatusResponse { status: "ok", database_path: self.db_path.display().to_string(), total_items, sources })
+        Ok(StatusResponse {
+            status: "ok",
+            version: VERSION,
+            uptime_seconds: self.start_time.elapsed().as_secs(),
+            database_path: self.db_path.display().to_string(),
+            total_items,
+            sources,
+        })
     }
 }
 
@@ -111,6 +119,8 @@ struct FeedResponse {
 #[derive(Serialize)]
 struct StatusResponse {
     status: &'static str,
+    version: &'static str,
+    uptime_seconds: u64,
     database_path: String,
     total_items: usize,
     sources: Vec<SourceStat>,
@@ -240,7 +250,7 @@ mod tests {
     fn status_snapshot_reports_counts() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("status.db");
-        let state = AppState { db_path: Arc::new(db_path.clone()) };
+        let state = AppState { db_path: Arc::new(db_path.clone()), start_time: Instant::now() };
 
         let storage = state.open_storage().unwrap();
         let now = Utc::now().to_rfc3339();
@@ -260,6 +270,8 @@ mod tests {
 
         let snapshot = state.status_snapshot().unwrap();
         assert_eq!(snapshot.status, "ok");
+        assert_eq!(snapshot.version, VERSION);
+        assert!(snapshot.uptime_seconds < 5);
         assert_eq!(snapshot.total_items, 1);
         assert_eq!(snapshot.sources.len(), 1);
         assert_eq!(snapshot.sources[0].kind, "substack");

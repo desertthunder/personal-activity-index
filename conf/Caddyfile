@@ -1,0 +1,31 @@
+# Caddyfile for Personal Activity Index
+# Caddy automatically handles HTTPS with Let's Encrypt
+
+# Basic configuration for localhost (HTTP only)
+localhost {
+    reverse_proxy 127.0.0.1:8080
+    encode gzip zstd
+}
+
+# Configuration with custom domain
+# Uncomment and replace example.com with your domain:
+#
+# pai.example.com {
+#     reverse_proxy 127.0.0.1:8080
+#     encode gzip zstd
+#
+#     header {
+#         Referrer-Policy "no-referrer-when-downgrade"
+#         X-Content-Type-Options "nosniff"
+#         X-Frame-Options "SAMEORIGIN"
+#     }
+#
+#     # Optional: Rate limiting
+#     # rate_limit {
+#     #     zone static {
+#     #         key {remote_host}
+#     #         events 100
+#     #         window 1m
+#     #     }
+#     # }
+# }

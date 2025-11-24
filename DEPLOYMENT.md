@@ -1,10 +1,31 @@
 # Personal Activity Index – Deployment Guide
 
-This guide walks through two common reverse proxy setups for `pai serve`: **nginx** and **Caddy**. Both sections include native (host binary) instructions and optional Docker paths if you prefer containerized deployments.
+This guide walks through two common reverse proxy setups for `pai serve`: **nginx** and **Caddy**.
+Both sections include native (host binary) instructions and optional Docker paths if you prefer containerized deployments.
+
+## Table of Contents
+
+- [Prerequisites](#prerequisites)
+- [nginx Deployment](#nginx-deployment)
+    - [Host Setup](#host-setup)
+    - [nginx Config](#nginx-config)
+    - [Optional: nginx via Docker](#optional-nginx-via-docker)
+- [Caddy Deployment](#caddy-deployment)
+    - [Host Setup](#host-setup-1)
+    - [Caddyfile Example](#caddyfile-example)
+    - [Optional: Caddy + Docker Compose](#optional-caddy--docker-compose)
+- [Health Checks & Monitoring](#health-checks--monitoring)
+- [Cloudflare Worker Deployment](#cloudflare-worker-deployment)
+    - [Prerequisites](#prerequisites-1)
+    - [Quick Start](#quick-start)
+    - [Cron Triggers](#cron-triggers)
+    - [API Endpoints](#api-endpoints)
+    - [Local Development](#local-development)
+    - [Monitoring](#monitoring)
 
 ## Prerequisites
 
-1. Build the CLI binary:
+1. Build binary:
 
    ```sh
    cargo build --release -p pai
@@ -13,7 +34,6 @@ This guide walks through two common reverse proxy setups for `pai serve`: **ngin
    The binary will live at `target/release/pai`.
 
 2. Prepare a configuration + database location. The default locations follow the XDG spec, but you can override them with `-C` (config dir) and `-d` (database path).
-
 3. Run a sync at least once so the database has data:
 
    ```sh
@@ -160,13 +180,121 @@ Use the same `Caddyfile` contents as above, but point `reverse_proxy` to `pai:80
 
 ## Health Checks & Monitoring
 
-- `GET /status` – lightweight JSON (`status`, total items, counts per `source_kind`). Ideal for load balancer health probes.
+- `GET /status` – lightweight JSON (`status`, version, uptime, total items, counts per `source_kind`). Ideal for load balancer health probes.
 - `GET /api/feed?limit=1` ensures the server can read from SQLite and return real data.
 - `GET /api/item/{id}` is handy for debugging a specific record.
 - Consider wiring `/status` into nginx/Caddy health checks (`/healthz`) or your platform’s monitoring agents.
 
-## Security Tips
+## Cloudflare Worker Deployment
 
-- Bind the `pai serve` process to `127.0.0.1` and let the proxy handle TLS.
-- Run the binary as an unprivileged user with read/write access only to the DB path.
-- Regularly rotate TLS certificates (Caddy does this automatically; for nginx use certbot or similar).
+The Personal Activity Index can also be deployed as a Cloudflare Worker with D1 database, providing a serverless alternative to self-hosting.
+
+### Prerequisites
+
+1. Cloudflare account with Workers enabled
+2. [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/install-and-update/) installed
+3. Rust toolchain with `wasm32-unknown-unknown` target
+
+### Quick Start
+
+#### 1. Generate Scaffolding
+
+Use the `pai cf-init` command to generate Cloudflare Worker configuration:
+
+```sh
+# Dry run to preview files
+pai cf-init --dry-run -o cloudflare-deployment
+
+# Create scaffolding
+pai cf-init -o cloudflare-deployment
+cd cloudflare-deployment
+```
+
+This creates:
+
+- `wrangler.example.toml` - Worker configuration template
+- `schema.sql` - D1 database schema
+- `README.md` - Deployment instructions
+
+#### 2. Create D1 Database
+
+```sh
+wrangler d1 create personal-activity-db
+```
+
+Copy the database ID from the output and update `wrangler.example.toml`:
+
+```toml
+[[d1_databases]]
+binding = "DB"
+database_name = "personal-activity-db"
+database_id = "your-database-id-here"  # Replace with actual ID
+```
+
+Then copy to the active config:
+
+```sh
+cp wrangler.example.toml wrangler.toml
+```
+
+#### 3. Initialize Database Schema
+
+```sh
+wrangler d1 execute personal-activity-db --file=schema.sql
+```
+
+#### 4. Build and Deploy
+
+```sh
+# Build the worker
+cd ..
+cargo install worker-build
+worker-build --release -p pai-worker
+
+# Deploy
+cd cloudflare-deployment
+wrangler deploy
+```
+
+### Cron Triggers
+
+The worker includes a scheduled event handler for automatic syncing. Configure the schedule in `wrangler.toml`:
+
+```toml
+[triggers]
+crons = ["0 * * * *"]  # Every hour at minute 0
+```
+
+Common schedules:
+
+- `*/30 * * * *` - Every 30 minutes
+- `0 */6 * * *` - Every 6 hours
+- `0 0 * * *` - Daily at midnight
+
+### API Endpoints
+
+The Worker exposes the same API as the self-hosted server:
+
+- `GET /api/feed?source_kind=bluesky&limit=20` - List items
+- `GET /api/item/{id}` - Get single item
+- `GET /status` - Health check
+
+### Local Development
+
+Test the worker locally before deploying:
+
+```sh
+wrangler dev
+```
+
+This starts a local server at `http://localhost:8787` with live reload.
+
+### Monitoring
+
+View logs in real-time:
+
+```sh
+wrangler tail
+```
+
+Or check logs in the [Cloudflare Dashboard](https://dash.cloudflare.com) under Workers & Pages.

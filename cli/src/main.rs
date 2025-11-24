@@ -8,9 +8,9 @@ use chrono::{DateTime, Duration, Utc};
 use clap::Parser;
 use owo_colors::OwoColorize;
 use pai_core::{Config, Item, ListFilter, PaiError, SourceKind};
-use std::fs::File;
+use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use storage::SqliteStorage;
 
@@ -18,6 +18,7 @@ const PUBLISHED_WIDTH: usize = 19;
 const KIND_WIDTH: usize = 9;
 const SOURCE_WIDTH: usize = 24;
 const TITLE_WIDTH: usize = 60;
+const MAN_PAGE: &str = include_str!(env!("PAI_MAN_PAGE"));
 
 fn main() {
     let cli = Cli::parse();
@@ -31,6 +32,8 @@ fn main() {
         Commands::Serve { address } => handle_serve(cli.db_path, address),
         Commands::DbCheck => handle_db_check(cli.db_path),
         Commands::Init { force } => handle_init(cli.config_dir, force),
+        Commands::Man { output, install, install_dir } => handle_man(output, install, install_dir),
+        Commands::CfInit { output_dir, dry_run } => handle_cf_init(output_dir, dry_run),
     };
 
     if let Err(e) = result {
@@ -170,11 +173,10 @@ fn handle_init(config_dir: Option<PathBuf>, force: bool) -> Result<(), PaiError>
         return Err(PaiError::Config("Config file already exists".to_string()));
     }
 
-    std::fs::create_dir_all(&config_dir)
-        .map_err(|e| PaiError::Config(format!("Failed to create config directory: {e}")))?;
+    fs::create_dir_all(&config_dir).map_err(|e| PaiError::Config(format!("Failed to create config directory: {e}")))?;
 
     let default_config = include_str!("../../config.example.toml");
-    std::fs::write(&config_path, default_config)
+    fs::write(&config_path, default_config)
         .map_err(|e| PaiError::Config(format!("Failed to write config file: {e}")))?;
 
     println!("{} Created configuration file", "Success:".green().bold());
@@ -191,6 +193,203 @@ fn handle_init(config_dir: Option<PathBuf>, force: bool) -> Result<(), PaiError>
     println!("     {}", "pai sync".bright_black());
     println!("  3. List your items:");
     println!("     {}", "pai list -n 10".bright_black());
+
+    Ok(())
+}
+
+fn handle_man(output: Option<PathBuf>, install: bool, install_dir: Option<PathBuf>) -> Result<(), PaiError> {
+    if install && output.is_some() {
+        return Err(PaiError::InvalidArgument(
+            "Use either --install or -o/--output when generating manpages".to_string(),
+        ));
+    }
+
+    let target = if install { Some(resolve_man_install_path(install_dir)?) } else { output };
+
+    let mut writer = create_output_writer(target.as_ref())?;
+    writer.write_all(MAN_PAGE.as_bytes()).map_err(PaiError::Io)?;
+    writer.flush().map_err(PaiError::Io)?;
+
+    if let Some(path) = target {
+        if install {
+            println!("{} Installed manpage to {}", "Success:".green(), path.display());
+            if let Some(root) = man_root_for(&path) {
+                println!(
+                    "{} Ensure {} is on your MANPATH, then run {}",
+                    "Hint:".yellow(),
+                    root.display(),
+                    "man pai".bright_black()
+                );
+            } else {
+                println!(
+                    "{} Run man pai after adding the install dir to MANPATH.",
+                    "Hint:".yellow()
+                );
+            }
+        } else {
+            println!("{} Wrote manpage to {}", "Success:".green(), path.display());
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_man_install_path(custom_dir: Option<PathBuf>) -> Result<PathBuf, PaiError> {
+    let base = if let Some(dir) = custom_dir { dir } else { find_writable_man_dir()? };
+
+    let install_dir = if base.file_name().map(|os| os == "man1").unwrap_or(false) { base } else { base.join("man1") };
+
+    fs::create_dir_all(&install_dir).map_err(|e| {
+        PaiError::Io(io::Error::new(
+            e.kind(),
+            format!("Failed to create man directory {}: {}", install_dir.display(), e),
+        ))
+    })?;
+
+    Ok(install_dir.join("pai.1"))
+}
+
+fn find_writable_man_dir() -> Result<PathBuf, PaiError> {
+    let candidates = [
+        dirs::data_local_dir().map(|d| d.join("man")),
+        dirs::home_dir().map(|d| d.join(".local/share/man")),
+        Some(PathBuf::from("/usr/local/share/man")),
+        Some(PathBuf::from("/opt/homebrew/share/man")),
+        Some(PathBuf::from("/usr/local/Homebrew/share/man")),
+    ];
+
+    for candidate in candidates.iter().flatten() {
+        if candidate.exists() {
+            let test_file = candidate.join(".pai-write-test");
+            if fs::write(&test_file, b"test").is_ok() {
+                let _ = fs::remove_file(&test_file);
+                return Ok(candidate.clone());
+            }
+        } else if let Some(parent) = candidate.parent() {
+            if parent.exists() {
+                let test_dir = candidate.join("man1");
+                if fs::create_dir_all(&test_dir).is_ok() {
+                    let _ = fs::remove_dir_all(&test_dir);
+                    return Ok(candidate.clone());
+                }
+            }
+        }
+    }
+
+    if let Some(data_dir) = dirs::data_local_dir() {
+        return Ok(data_dir.join("man"));
+    }
+
+    Err(PaiError::Config(
+        "Unable to find a writable man page directory. Use --install-dir to specify one.".to_string(),
+    ))
+}
+
+fn man_root_for(path: &Path) -> Option<&Path> {
+    path.parent()?.parent()
+}
+
+fn handle_cf_init(output_dir: Option<PathBuf>, dry_run: bool) -> Result<(), PaiError> {
+    let target_dir = output_dir.unwrap_or_else(|| PathBuf::from("."));
+
+    let wrangler_template = include_str!("../../worker/wrangler.example.toml");
+    let schema_sql = include_str!("../../worker/schema.sql");
+
+    let readme_content = r#"# Cloudflare Worker Deployment
+
+## Quick Start
+
+1. **Create D1 Database:**
+   ```sh
+   wrangler d1 create personal-activity-db
+   ```
+
+2. **Copy the configuration:**
+   ```sh
+   cp wrangler.example.toml wrangler.toml
+   ```
+
+3. **Update `wrangler.toml`:**
+   - Replace `{DATABASE_ID}` with the ID from step 1
+   - Adjust `name` and `database_name` if desired
+
+4. **Initialize the database schema:**
+   ```sh
+   wrangler d1 execute personal-activity-db --file=schema.sql
+   ```
+
+5. **Build the worker:**
+   ```sh
+   cd ..
+   cargo install worker-build
+   worker-build --release -p pai-worker
+   ```
+
+6. **Deploy:**
+   ```sh
+   cd worker
+   wrangler deploy
+   ```
+
+## Testing Locally
+
+Run the worker locally with:
+```sh
+wrangler dev
+```
+
+## Scheduled Syncs
+
+The worker is configured with a cron trigger (see `wrangler.toml`). The default schedule runs every hour.
+To modify the schedule, edit the `crons` array in `wrangler.toml`.
+
+## API Endpoints
+
+- `GET /api/feed` - List items with optional filters
+- `GET /api/item/:id` - Get a single item by ID
+- `GET /status` - Health check
+
+## Environment Variables
+
+Configure in `wrangler.toml` under `[vars]`:
+- `LOG_LEVEL` - Set logging verbosity (optional)
+"#;
+
+    let files = vec![
+        ("wrangler.example.toml", wrangler_template),
+        ("schema.sql", schema_sql),
+        ("README.md", readme_content),
+    ];
+
+    if dry_run {
+        println!("{} Dry run - showing files that would be created:\n", "Info:".cyan());
+        for (filename, content) in &files {
+            let path = target_dir.join(filename);
+            println!("  {} {}", "Would create:".bright_black(), path.display());
+            println!("    {} bytes", content.len());
+        }
+        println!("\n{} Run without --dry-run to create these files", "Hint:".yellow());
+        return Ok(());
+    }
+
+    fs::create_dir_all(&target_dir)?;
+
+    for (filename, content) in &files {
+        let path = target_dir.join(filename);
+        if path.exists() {
+            println!("{} {} already exists, skipping", "Warning:".yellow(), filename);
+            continue;
+        }
+        fs::write(&path, content)?;
+        println!("{} Created {}", "Success:".green(), path.display());
+    }
+
+    println!("\n{} Cloudflare Worker scaffolding created!", "Success:".green().bold());
+    println!("\n{} Next steps:", "Info:".cyan());
+    println!("  1. cd {}", target_dir.display());
+    println!("  2. Read README.md for deployment instructions");
+    println!("  3. wrangler d1 create personal-activity-db");
+    println!("  4. Update wrangler.example.toml with your database ID");
 
     Ok(())
 }
@@ -224,9 +423,10 @@ fn normalize_since_with_now(since: Option<String>, now: DateTime<Utc>) -> Result
         return Ok(Some(dt.with_timezone(&Utc).to_rfc3339()));
     }
 
-    Err(PaiError::InvalidArgument(format!(
+    let msg = format!(
         "Invalid since value '{value}'. Use ISO 8601 (e.g. 2024-01-01T00:00:00Z) or relative forms like 7d/24h/60m."
-    )))
+    );
+    Err(PaiError::InvalidArgument(msg))
 }
 
 fn parse_relative_duration(input: &str) -> Option<Duration> {
@@ -296,10 +496,10 @@ fn create_output_writer(path: Option<&PathBuf>) -> Result<Box<dyn Write>, PaiErr
     if let Some(path) = path {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
+                fs::create_dir_all(parent)?;
             }
         }
-        let file = File::create(path)?;
+        let file = fs::File::create(path)?;
         Ok(Box::new(file))
     } else {
         Ok(Box::new(io::stdout()))
@@ -547,5 +747,11 @@ mod tests {
     fn truncate_column_adds_ellipsis() {
         let truncated = truncate_for_column("abcdefghijklmnopqrstuvwxyz", 8);
         assert_eq!(truncated, "abcde...");
+    }
+
+    #[test]
+    fn manpage_contains_name_section() {
+        assert!(MAN_PAGE.contains("NAME"));
+        assert!(MAN_PAGE.contains("pai"));
     }
 }

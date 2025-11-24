@@ -1,18 +1,17 @@
 mod app;
 mod paths;
-mod server;
-mod storage;
 
 use app::{Cli, Commands, ExportOpts};
 use chrono::{DateTime, Duration, Utc};
 use clap::Parser;
 use owo_colors::OwoColorize;
 use pai_core::{Config, Item, ListFilter, PaiError, SourceKind};
+use pai_server::SqliteStorage;
+use rss::{Channel, ChannelBuilder, ItemBuilder};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use storage::SqliteStorage;
 
 const PUBLISHED_WIDTH: usize = 19;
 const KIND_WIDTH: usize = 9;
@@ -133,7 +132,7 @@ fn handle_export(db_path: Option<PathBuf>, opts: ExportOpts) -> Result<(), PaiEr
 
 fn handle_serve(db_path: Option<PathBuf>, address: String) -> Result<(), PaiError> {
     let db_path = paths::resolve_db_path(db_path)?;
-    server::serve(db_path, address)
+    pai_server::serve(db_path, &address)
 }
 
 fn handle_db_check(db_path: Option<PathBuf>) -> Result<(), PaiError> {
@@ -532,53 +531,59 @@ fn write_ndjson(items: &[Item], writer: &mut dyn Write) -> Result<(), PaiError> 
 }
 
 fn write_rss(items: &[Item], writer: &mut dyn Write) -> Result<(), PaiError> {
-    let feed = build_rss_feed(items)?;
-    writer.write_all(feed.as_bytes()).map_err(PaiError::Io)?;
+    let channel = build_rss_channel(items)?;
+    let rss_string = channel.to_string();
+    writer.write_all(rss_string.as_bytes()).map_err(PaiError::Io)?;
     writer.write_all(b"\n").map_err(PaiError::Io)
 }
 
-fn build_rss_feed(items: &[Item]) -> Result<String, PaiError> {
+fn build_rss_channel(items: &[Item]) -> Result<Channel, PaiError> {
     const TITLE: &str = "Personal Activity Index";
     const LINK: &str = "https://personal-activity-index.local/";
     const DESCRIPTION: &str = "Aggregated feed exported by the Personal Activity Index CLI.";
 
-    let mut feed = String::new();
-    feed.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
-    feed.push_str("<rss version=\"2.0\"><channel>");
-    feed.push_str(&format!("<title>{TITLE}</title>"));
-    feed.push_str(&format!("<link>{LINK}</link>"));
-    feed.push_str(&format!("<description>{DESCRIPTION}</description>"));
+    let rss_items: Vec<rss::Item> = items
+        .iter()
+        .map(|item| {
+            let title = item
+                .title
+                .as_deref()
+                .or(item.summary.as_deref())
+                .unwrap_or(&item.url)
+                .to_string();
+            let description = item
+                .summary
+                .as_deref()
+                .or(item.content_html.as_deref())
+                .unwrap_or("")
+                .to_string();
+            let author = item.author.as_deref().unwrap_or("Unknown").to_string();
+            let pub_date = format_rss_date(&item.published_at);
 
-    for item in items {
-        let title = item.title.as_deref().or(item.summary.as_deref()).unwrap_or(&item.url);
-        let description = item.summary.as_deref().or(item.content_html.as_deref()).unwrap_or("");
-        let author = item.author.as_deref().unwrap_or("Unknown");
+            ItemBuilder::default()
+                .title(Some(title))
+                .link(Some(item.url.clone()))
+                .guid(Some(
+                    rss::GuidBuilder::default().value(&item.id).permalink(false).build(),
+                ))
+                .pub_date(Some(pub_date))
+                .author(Some(author))
+                .description(Some(description))
+                .categories(vec![rss::CategoryBuilder::default()
+                    .name(item.source_kind.to_string())
+                    .build()])
+                .build()
+        })
+        .collect();
 
-        feed.push_str("<item>");
-        feed.push_str(&format!("<title>{}</title>", escape_xml(title)));
-        feed.push_str(&format!("<link>{}</link>", escape_xml(&item.url)));
-        feed.push_str(&format!("<guid isPermaLink=\"false\">{}</guid>", escape_xml(&item.id)));
-        feed.push_str(&format!(
-            "<category>{}</category>",
-            escape_xml(&item.source_kind.to_string())
-        ));
-        feed.push_str(&format!("<author>{}</author>", escape_xml(author)));
-        feed.push_str(&format!("<description>{}</description>", escape_xml(description)));
-        feed.push_str(&format!("<pubDate>{}</pubDate>", format_rss_date(&item.published_at)));
-        feed.push_str("</item>");
-    }
+    let channel = ChannelBuilder::default()
+        .title(TITLE)
+        .link(LINK)
+        .description(DESCRIPTION)
+        .items(rss_items)
+        .build();
 
-    feed.push_str("</channel></rss>");
-    Ok(feed)
-}
-
-fn escape_xml(input: &str) -> String {
-    input
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('\"', "&quot;")
-        .replace('\'', "&apos;")
+    Ok(channel)
 }
 
 fn format_rss_date(value: &str) -> String {
@@ -728,7 +733,8 @@ mod tests {
 
     #[test]
     fn rss_export_contains_items() {
-        let feed = build_rss_feed(&[sample_item()]).unwrap();
+        let channel = build_rss_channel(&[sample_item()]).unwrap();
+        let feed = channel.to_string();
         assert!(feed.contains("<rss"));
         assert!(feed.contains("<item>"));
         assert!(feed.contains("sample-id"));

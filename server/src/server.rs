@@ -1,14 +1,16 @@
 use crate::storage::SqliteStorage;
-use crate::{ensure_positive_limit, normalize_optional_string, normalize_since_input};
+
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
+use chrono::DateTime;
 use owo_colors::OwoColorize;
 use pai_core::{Item, ListFilter, PaiError, SourceKind};
+use rss::{Channel, ChannelBuilder, ItemBuilder};
 use serde::{Deserialize, Serialize};
 use std::{io, net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
 use tokio::net::TcpListener;
@@ -17,7 +19,7 @@ const DEFAULT_LIMIT: usize = 20;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Launches the HTTP server using the provided SQLite database path and address.
-pub(crate) fn serve(db_path: PathBuf, address: String) -> Result<(), PaiError> {
+pub fn serve(db_path: PathBuf, address: &str) -> Result<(), PaiError> {
     let addr: SocketAddr = address
         .parse()
         .map_err(|e| PaiError::Config(format!("Invalid listen address '{address}': {e}")))?;
@@ -41,6 +43,7 @@ async fn run_server(db_path: PathBuf, addr: SocketAddr) -> Result<(), PaiError> 
         .route("/api/feed", get(feed_handler))
         .route("/api/item/:id", get(item_handler))
         .route("/status", get(status_handler))
+        .route("/rss.xml", get(rss_handler))
         .with_state(state);
 
     let listener = TcpListener::bind(addr).await.map_err(PaiError::Io)?;
@@ -104,7 +107,7 @@ impl FeedQuery {
             source_kind: self.source_kind,
             source_id: normalize_optional_string(self.source_id),
             limit: Some(limit),
-            since: normalize_since_input(self.since)?,
+            since: normalize_optional_string(self.since),
             query: normalize_optional_string(self.q),
         })
     }
@@ -156,6 +159,87 @@ async fn status_handler(State(state): State<AppState>) -> Result<Json<StatusResp
     Ok(Json(snapshot))
 }
 
+async fn rss_handler(State(state): State<AppState>, Query(query): Query<FeedQuery>) -> Result<RssResponse, ApiError> {
+    let filter = query.into_filter()?;
+    let storage = state.open_storage()?;
+    let items = pai_core::Storage::list_items(&storage, &filter)?;
+
+    let channel = build_rss_channel(&items)?;
+    Ok(RssResponse(channel))
+}
+
+fn build_rss_channel(items: &[Item]) -> Result<Channel, PaiError> {
+    const TITLE: &str = "Personal Activity Index";
+    const LINK: &str = "https://personal-activity-index.local/";
+    const DESCRIPTION: &str = "Aggregated feed exported by the Personal Activity Index.";
+
+    let rss_items: Vec<rss::Item> = items
+        .iter()
+        .map(|item| {
+            let title = item
+                .title
+                .as_deref()
+                .or(item.summary.as_deref())
+                .unwrap_or(&item.url)
+                .to_string();
+            let description = item
+                .summary
+                .as_deref()
+                .or(item.content_html.as_deref())
+                .unwrap_or("")
+                .to_string();
+            let author = item.author.as_deref().unwrap_or("Unknown").to_string();
+            let pub_date = format_rss_date(&item.published_at);
+
+            ItemBuilder::default()
+                .title(Some(title))
+                .link(Some(item.url.clone()))
+                .guid(Some(
+                    rss::GuidBuilder::default().value(&item.id).permalink(false).build(),
+                ))
+                .pub_date(Some(pub_date))
+                .author(Some(author))
+                .description(Some(description))
+                .categories(vec![rss::CategoryBuilder::default()
+                    .name(item.source_kind.to_string())
+                    .build()])
+                .build()
+        })
+        .collect();
+
+    let channel = ChannelBuilder::default()
+        .title(TITLE)
+        .link(LINK)
+        .description(DESCRIPTION)
+        .items(rss_items)
+        .build();
+
+    Ok(channel)
+}
+
+fn format_rss_date(value: &str) -> String {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
+        dt.to_rfc2822()
+    } else if let Ok(dt) = DateTime::parse_from_rfc2822(value) {
+        dt.to_rfc2822()
+    } else {
+        value.to_string()
+    }
+}
+
+struct RssResponse(Channel);
+
+impl IntoResponse for RssResponse {
+    fn into_response(self) -> Response {
+        let rss_string = self.0.to_string();
+        (
+            [(header::CONTENT_TYPE, "application/rss+xml; charset=utf-8")],
+            rss_string,
+        )
+            .into_response()
+    }
+}
+
 struct ApiError {
     status: StatusCode,
     message: String,
@@ -199,6 +283,24 @@ async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
+fn ensure_positive_limit(limit: usize) -> Result<usize, PaiError> {
+    if limit == 0 {
+        return Err(PaiError::InvalidArgument("Limit must be greater than zero".to_string()));
+    }
+    Ok(limit)
+}
+
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value.and_then(|input| {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,9 +329,9 @@ mod tests {
         let filter = query.into_filter().unwrap();
         assert_eq!(filter.limit, Some(5));
         assert_eq!(filter.source_kind, Some(SourceKind::Bluesky));
-        assert_eq!(filter.source_id.unwrap(), "desertthunder.dev");
-        assert_eq!(filter.query.unwrap(), "rust");
-        assert_eq!(filter.since.unwrap(), "2024-01-01T00:00:00+00:00");
+        assert_eq!(filter.source_id.as_deref(), Some("desertthunder.dev"));
+        assert_eq!(filter.query.as_deref(), Some("rust"));
+        assert_eq!(filter.since.as_deref(), Some("2024-01-01T00:00:00Z"));
     }
 
     #[test]
@@ -250,7 +352,7 @@ mod tests {
     fn status_snapshot_reports_counts() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("status.db");
-        let state = AppState { db_path: Arc::new(db_path.clone()), start_time: Instant::now() };
+        let state = AppState { db_path: Arc::new(db_path), start_time: Instant::now() };
 
         let storage = state.open_storage().unwrap();
         let now = Utc::now().to_rfc3339();

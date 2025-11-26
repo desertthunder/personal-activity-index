@@ -1,0 +1,110 @@
+{
+  "name": "Personal Activity Index API",
+  "version": "0.0.0",
+  "description": "Aggregate and query your personal activity across multiple platforms",
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/",
+      "description": "API documentation",
+      "response": "This documentation in JSON format"
+    },
+    {
+      "method": "GET",
+      "path": "/status",
+      "description": "Health check and version information",
+      "response": {
+        "status": "ok",
+        "version": "string"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/feed",
+      "description": "List items from all sources with optional filtering",
+      "parameters": [
+        {
+          "name": "source_kind",
+          "type": "string",
+          "required": false,
+          "description": "Filter by source type",
+          "values": ["substack", "bluesky", "leaflet", "bearblog"]
+        },
+        {
+          "name": "source_id",
+          "type": "string",
+          "required": false,
+          "description": "Filter by specific source identifier (domain or handle)"
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false,
+          "default": 20,
+          "description": "Maximum number of items to return"
+        },
+        {
+          "name": "since",
+          "type": "string",
+          "required": false,
+          "description": "ISO 8601 timestamp - only return items published after this time"
+        },
+        {
+          "name": "q",
+          "type": "string",
+          "required": false,
+          "description": "Search query - matches against title and summary"
+        }
+      ],
+      "response": {
+        "items": [
+          {
+            "id": "string",
+            "source_kind": "bluesky|substack|leaflet|bearblog",
+            "source_id": "string",
+            "author": "string?",
+            "title": "string?",
+            "summary": "string?",
+            "url": "string",
+            "content_html": "string?",
+            "published_at": "ISO 8601 timestamp",
+            "created_at": "ISO 8601 timestamp"
+          }
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/item/:id",
+      "description": "Get a single item by its unique ID",
+      "parameters": [
+        {
+          "name": "id",
+          "type": "string",
+          "required": true,
+          "description": "The unique identifier of the item"
+        }
+      ],
+      "response": "Single item object or 404 if not found"
+    },
+    {
+      "method": "POST",
+      "path": "/api/sync",
+      "description": "Manually trigger synchronization from all configured sources",
+      "response": {
+        "status": "success",
+        "message": "Sync completed successfully"
+      }
+    }
+  ],
+  "sources": {
+    "substack": "RSS feeds from Substack publications",
+    "bluesky": "Posts from Bluesky via AT Protocol API",
+    "leaflet": "Publications from Leaflet (Bluesky-based blogging)",
+    "bearblog": "Posts from Bear Blog RSS feeds"
+  },
+  "scheduled_sync": {
+    "description": "Automatic synchronization runs on a scheduled basis",
+    "schedule": "Configured via cron triggers in wrangler.toml"
+  }
+}

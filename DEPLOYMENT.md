@@ -193,7 +193,9 @@ The Personal Activity Index can also be deployed as a Cloudflare Worker with D1 
 
 1. Cloudflare account with Workers enabled
 2. [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/install-and-update/) installed
+  `npx wrangler` works here as well.
 3. Rust toolchain with `wasm32-unknown-unknown` target
+4. Crate `worker-build`
 
 ### Quick Start
 
@@ -228,7 +230,7 @@ Copy the database ID from the output and update `wrangler.example.toml`:
 [[d1_databases]]
 binding = "DB"
 database_name = "personal-activity-db"
-database_id = "your-database-id-here"  # Replace with actual ID
+database_id = "your-database-id-here"  # Replace with returned database_id
 ```
 
 Then copy to the active config:
@@ -240,8 +242,10 @@ cp wrangler.example.toml wrangler.toml
 #### 3. Initialize Database Schema
 
 ```sh
-wrangler d1 execute personal-activity-db --file=schema.sql
+wrangler d1 execute personal-activity-db --remote --file=schema.sql
 ```
+
+Note that you can omit `--remote` for local development.
 
 #### 4. Build and Deploy
 
@@ -249,9 +253,26 @@ wrangler d1 execute personal-activity-db --file=schema.sql
 # Build the worker
 cd ..
 cargo install worker-build
-worker-build --release -p pai-worker
+worker-build --release worker
+```
 
-# Deploy
+#### 5. Patch Generated Code
+
+The worker-build output requires two patches for compatibility with wrangler:
+
+```sh
+# 1. Fix import syntax (remove 'source' keyword)
+sed -i.bak 's/import source wasmModule/import wasmModule/' worker/build/index.js
+
+# 2. Add default export for ES module format (required for D1 bindings)
+echo -e "\nexport default { fetch, scheduled };" >> worker/build/index.js
+```
+
+On macOS, use `sed -i '' ...` instead of `sed -i.bak ...`.
+
+#### 6. Deploy
+
+```sh
 cd cloudflare-deployment
 wrangler deploy
 ```
@@ -292,11 +313,13 @@ BEARBLOG_URLS = "desertthunder:https://desertthunder.bearblog.dev"
 
 ### API Endpoints
 
-The Worker exposes the same API as the self-hosted server:
+The Worker exposes the following API:
 
-- `GET /api/feed?source_kind=bluesky&limit=20` - List items
-- `GET /api/item/{id}` - Get single item
-- `GET /status` - Health check
+- `GET /` - API documentation (JSON)
+- `GET /api/feed?source_kind=bluesky&limit=20` - List items with optional filters
+- `GET /api/item/{id}` - Get single item by ID
+- `POST /api/sync` - Manually trigger synchronization from all configured sources
+- `GET /status` - Health check and version info
 
 ### Local Development
 

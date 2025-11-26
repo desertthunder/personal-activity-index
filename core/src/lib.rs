@@ -1,3 +1,4 @@
+#[cfg(not(target_arch = "wasm32"))]
 mod fetchers;
 
 use serde::{Deserialize, Serialize};
@@ -5,6 +6,7 @@ use std::path::Path;
 use std::{fmt, str::FromStr};
 use thiserror::Error;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use fetchers::{BearBlogFetcher, BlueskyFetcher, LeafletFetcher, SubstackFetcher};
 
 /// Errors that can occur in the Personal Activity Index
@@ -227,6 +229,7 @@ impl FromStr for Config {
 /// Returns the number of sources successfully synced.
 ///
 /// Filters sources based on optional kind and source_id parameters.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn sync_all_sources(
     config: &Config, storage: &dyn Storage, kind: Option<SourceKind>, source_id: Option<&str>,
 ) -> Result<usize> {

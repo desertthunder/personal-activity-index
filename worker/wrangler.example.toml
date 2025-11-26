@@ -2,7 +2,7 @@
 # Copy this file to wrangler.toml and update with your values
 
 name = "personal-activity-index"
-main = "build/worker/index.js"
+main = "build/index.js"
 compatibility_date = "2025-01-15"
 
 # D1 Database Binding
@@ -38,3 +38,10 @@ BEARBLOG_URLS = "desertthunder:https://desertthunder.bearblog.dev"
 
 # Optional: Logging level
 # LOG_LEVEL = "info"
+
+[observability]
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+persist = true

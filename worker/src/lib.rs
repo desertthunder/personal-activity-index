@@ -3,6 +3,55 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::JsValue;
 use worker::*;
 
+#[derive(Serialize, Deserialize)]
+struct ApiDocumentation {
+    name: String,
+    version: String,
+    description: String,
+    endpoints: Vec<Endpoint>,
+    sources: Sources,
+    scheduled_sync: ScheduledSync,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Endpoint {
+    method: String,
+    path: String,
+    url: Option<String>,
+    description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parameters: Option<Vec<Parameter>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    examples: Option<Vec<String>>,
+    response: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Parameter {
+    name: String,
+    r#type: String,
+    required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default: Option<serde_json::Value>,
+    description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    values: Option<Vec<String>>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Sources {
+    substack: String,
+    bluesky: String,
+    leaflet: String,
+    bearblog: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ScheduledSync {
+    description: String,
+    schedule: String,
+}
+
 #[derive(Deserialize)]
 struct SyncConfig {
     substack: Option<SubstackConfig>,
@@ -51,12 +100,40 @@ struct FeedResponse {
 struct StatusResponse {
     status: &'static str,
     version: &'static str,
+    total_items: usize,
+    sources: std::collections::HashMap<String, usize>,
 }
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let router = Router::new();
     router
+        .get_async("/", |req, _ctx| async move {
+            let url = req
+                .url()
+                .map_err(|e| Error::RustError(format!("Failed to get URL: {e}")))?;
+            let base_url = url.origin().unicode_serialization();
+
+            let docs_template = include_str!("../api-docs.json");
+            let mut docs: ApiDocumentation = serde_json::from_str(docs_template)
+                .map_err(|e| Error::RustError(format!("Failed to parse API docs: {e}")))?;
+
+            docs.version = env!("CARGO_PKG_VERSION").to_string();
+
+            for endpoint in &mut docs.endpoints {
+                endpoint.url = Some(format!("{}{}", base_url, endpoint.path));
+
+                if endpoint.path == "/api/feed" {
+                    endpoint.examples = Some(vec![
+                        format!("{}/api/feed", base_url),
+                        format!("{}/api/feed?source_kind=bluesky&limit=10", base_url),
+                        format!("{}/api/feed?q=rust&limit=5", base_url),
+                    ]);
+                }
+            }
+
+            Response::from_json(&docs)
+        })
         .get_async("/api/feed", |req, ctx| async move { handle_feed(req, ctx).await })
         .get_async("/api/item/:id", |_req, ctx| async move {
             let id = ctx
@@ -64,9 +141,43 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 .ok_or_else(|| Error::RustError("Missing id parameter".into()))?;
             handle_item(id, &ctx).await
         })
-        .get("/status", |_req, _ctx| {
-            let version = env!("CARGO_PKG_VERSION");
-            let status = StatusResponse { status: "ok", version };
+        .post_async("/api/sync", |_req, ctx| async move {
+            match run_sync(&ctx.env).await {
+                Ok(_) => Response::from_json(&serde_json::json!({
+                    "status": "success",
+                    "message": "Sync completed successfully"
+                })),
+                Err(e) => Response::error(format!("Sync failed: {e}"), 500),
+            }
+        })
+        .get_async("/status", |_req, ctx| async move {
+            let db = ctx.env.d1("DB")?;
+
+            let total_result = db
+                .prepare("SELECT COUNT(*) as count FROM items")
+                .first::<serde_json::Value>(None)
+                .await?;
+
+            let total_items = total_result.and_then(|v| v.get("count")?.as_u64()).unwrap_or(0) as usize;
+
+            let sources_result = db
+                .prepare("SELECT source_kind, COUNT(*) as count FROM items GROUP BY source_kind")
+                .all()
+                .await?;
+
+            let mut sources = std::collections::HashMap::new();
+            if let Ok(results) = sources_result.results::<serde_json::Value>() {
+                for result in results {
+                    if let (Some(kind), Some(count)) = (
+                        result.get("source_kind").and_then(|v| v.as_str()),
+                        result.get("count").and_then(|v| v.as_u64()),
+                    ) {
+                        sources.insert(kind.to_string(), count as usize);
+                    }
+                }
+            }
+
+            let status = StatusResponse { status: "ok", version: env!("CARGO_PKG_VERSION"), total_items, sources };
             Response::from_json(&status)
         })
         .run(req, env)
@@ -144,13 +255,10 @@ async fn query_items(db: &D1Database, filter: &ListFilter) -> Result<Vec<Item>> 
 
     if let Some(limit) = filter.limit {
         query.push_str(" LIMIT ?");
-        bindings.push((limit as i64).into());
+        bindings.push((limit as f64).into());
     }
 
-    let mut stmt = db.prepare(&query);
-    for binding in bindings {
-        stmt = stmt.bind(&[binding])?;
-    }
+    let stmt = if bindings.is_empty() { db.prepare(&query) } else { db.prepare(&query).bind(&bindings)? };
 
     let results = stmt.all().await?;
     let items: Vec<Item> = results.results()?;
@@ -377,47 +485,32 @@ async fn sync_bluesky(config: &BlueskyConfig, db: &D1Database) -> Result<usize> 
 }
 
 async fn sync_leaflet(config: &LeafletConfig, db: &D1Database) -> Result<usize> {
-    let host = normalize_source_id(&config.base_url);
-    let subdomain = host.split('.').next().unwrap_or(&host);
-    let did = format!("{subdomain}.bsky.social");
+    let feed_url = format!("{}/rss", config.base_url.trim_end_matches('/'));
 
-    let api_url = format!(
-        "https://public.api.bsky.app/xrpc/com.atproto.repo.listRecords?repo={did}&collection=pub.leaflet.post&limit=50"
-    );
-
-    let mut req = Request::new(&api_url, Method::Get)?;
+    let mut req = Request::new(&feed_url, Method::Get)?;
     req.headers_mut()?.set("User-Agent", "pai-worker/0.1.0")?;
 
     let mut resp = Fetch::Request(req).send().await?;
-    let json: serde_json::Value = resp.json().await?;
+    let body = resp.text().await?;
 
-    let records = json["records"]
-        .as_array()
-        .ok_or_else(|| Error::RustError("Invalid Leaflet response".into()))?;
+    let channel =
+        rss::Channel::read_from(body.as_bytes()).map_err(|e| Error::RustError(format!("Failed to parse RSS: {e}")))?;
 
     let mut count = 0;
 
-    for record in records {
-        let uri = record["uri"]
-            .as_str()
-            .ok_or_else(|| Error::RustError("Missing URI".into()))?;
-        let value = &record["value"];
+    for item in channel.items() {
+        let id = item.guid().map(|g| g.value()).unwrap_or(item.link().unwrap_or(""));
+        let url = item.link().unwrap_or(id);
+        let title = item.title();
+        let summary = item.description();
+        let author = item.author();
+        let content_html = item.content();
 
-        let title = value["title"].as_str().unwrap_or("Untitled");
-        let summary = value["summary"].as_str().or(value["content"].as_str()).unwrap_or("");
-        let slug = value["slug"].as_str().unwrap_or("");
-
-        let url = if !slug.is_empty() {
-            format!("{}/{}", config.base_url, slug)
-        } else {
-            format!("{}/post/{}", config.base_url, uri.split('/').next_back().unwrap_or(""))
-        };
-
-        let published_at = value["publishedAt"]
-            .as_str()
-            .or(value["createdAt"].as_str())
-            .unwrap_or("")
-            .to_string();
+        let published_at = item
+            .pub_date()
+            .and_then(|s| chrono::DateTime::parse_from_rfc2822(s).ok())
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
         let created_at = chrono::Utc::now().to_rfc3339();
 
@@ -427,14 +520,14 @@ async fn sync_leaflet(config: &LeafletConfig, db: &D1Database) -> Result<usize> 
         );
 
         stmt.bind(&[
-            uri.into(),
+            id.into(),
             "leaflet".into(),
             config.id.clone().into(),
-            JsValue::NULL,
-            title.into(),
-            summary.into(),
+            author.map(|s| s.into()).unwrap_or(JsValue::NULL),
+            title.map(|s| s.into()).unwrap_or(JsValue::NULL),
+            summary.map(|s| s.into()).unwrap_or(JsValue::NULL),
             url.into(),
-            JsValue::NULL,
+            content_html.map(|s| s.into()).unwrap_or(JsValue::NULL),
             published_at.into(),
             created_at.into(),
         ])?
@@ -448,7 +541,7 @@ async fn sync_leaflet(config: &LeafletConfig, db: &D1Database) -> Result<usize> 
 }
 
 async fn sync_bearblog(config: &BearBlogConfig, db: &D1Database) -> Result<usize> {
-    let feed_url = format!("{}/feed/", config.base_url.trim_end_matches('/'));
+    let feed_url = format!("{}/feed/?type=rss", config.base_url.trim_end_matches('/'));
 
     let mut req = Request::new(&feed_url, Method::Get)?;
     req.headers_mut()?.set("User-Agent", "pai-worker/0.1.0")?;
@@ -516,6 +609,76 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_api_docs_json_is_valid() {
+        let docs_str = include_str!("../api-docs.json");
+        let result = serde_json::from_str::<ApiDocumentation>(docs_str);
+        assert!(result.is_ok(), "API docs JSON should be valid: {:?}", result.err());
+
+        let docs = result.unwrap();
+        assert_eq!(docs.name, "Personal Activity Index API");
+        assert!(!docs.description.is_empty());
+        assert!(!docs.endpoints.is_empty());
+    }
+
+    #[test]
+    fn test_api_docs_has_all_endpoints() {
+        let docs_str = include_str!("../api-docs.json");
+        let docs: ApiDocumentation = serde_json::from_str(docs_str).unwrap();
+
+        let paths: Vec<&str> = docs.endpoints.iter().map(|e| e.path.as_str()).collect();
+
+        assert!(paths.contains(&"/"));
+        assert!(paths.contains(&"/status"));
+        assert!(paths.contains(&"/api/feed"));
+        assert!(paths.contains(&"/api/item/:id"));
+        assert!(paths.contains(&"/api/sync"));
+    }
+
+    #[test]
+    fn test_api_docs_feed_endpoint_parameters() {
+        let docs_str = include_str!("../api-docs.json");
+        let docs: ApiDocumentation = serde_json::from_str(docs_str).unwrap();
+
+        let feed_endpoint = docs.endpoints.iter().find(|e| e.path == "/api/feed").unwrap();
+        let params = feed_endpoint.parameters.as_ref().unwrap();
+        let param_names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+
+        assert!(param_names.contains(&"source_kind"));
+        assert!(param_names.contains(&"source_id"));
+        assert!(param_names.contains(&"limit"));
+        assert!(param_names.contains(&"since"));
+        assert!(param_names.contains(&"q"));
+    }
+
+    #[test]
+    fn test_api_docs_has_source_descriptions() {
+        let docs_str = include_str!("../api-docs.json");
+        let docs: ApiDocumentation = serde_json::from_str(docs_str).unwrap();
+
+        assert!(!docs.sources.substack.is_empty());
+        assert!(!docs.sources.bluesky.is_empty());
+        assert!(!docs.sources.leaflet.is_empty());
+        assert!(!docs.sources.bearblog.is_empty());
+    }
+
+    #[test]
+    fn test_api_docs_url_generation() {
+        let docs_str = include_str!("../api-docs.json");
+        let mut docs: ApiDocumentation = serde_json::from_str(docs_str).unwrap();
+
+        let base_url = "https://example.workers.dev";
+        for endpoint in &mut docs.endpoints {
+            endpoint.url = Some(format!("{}{}", base_url, endpoint.path));
+        }
+
+        let root = docs.endpoints.iter().find(|e| e.path == "/").unwrap();
+        assert_eq!(root.url.as_ref().unwrap(), "https://example.workers.dev/");
+
+        let feed = docs.endpoints.iter().find(|e| e.path == "/api/feed").unwrap();
+        assert_eq!(feed.url.as_ref().unwrap(), "https://example.workers.dev/api/feed");
+    }
+
+    #[test]
     fn test_normalize_source_id_https() {
         assert_eq!(
             normalize_source_id("https://patternmatched.substack.com"),
@@ -558,28 +721,6 @@ mod tests {
         let text = "a".repeat(100);
         let title = if text.len() > 100 { format!("{}...", &text[..97]) } else { text.to_string() };
         assert_eq!(title, text);
-    }
-
-    #[test]
-    fn test_leaflet_url_with_slug() {
-        let base_url = "https://test.leaflet.pub";
-        let slug = "my-post";
-        let url = if !slug.is_empty() {
-            format!("{base_url}/{slug}")
-        } else {
-            format!("{}/post/{}", base_url, "fallback")
-        };
-        assert_eq!(url, "https://test.leaflet.pub/my-post");
-    }
-
-    #[test]
-    fn test_leaflet_url_without_slug() {
-        let base_url = "https://test.leaflet.pub";
-        let slug = "";
-        let uri = "at://did:plc:abc123/pub.leaflet.post/xyz789";
-        let post_id = uri.split('/').next_back().unwrap_or("");
-        let url = if !slug.is_empty() { format!("{base_url}/{slug}") } else { format!("{base_url}/post/{post_id}") };
-        assert_eq!(url, "https://test.leaflet.pub/post/xyz789");
     }
 
     #[test]
@@ -653,22 +794,10 @@ mod tests {
     }
 
     #[test]
-    fn test_leaflet_did_construction() {
-        let subdomain = "desertthunder";
-        let did = format!("{subdomain}.bsky.social");
-        assert_eq!(did, "desertthunder.bsky.social");
-    }
-
-    #[test]
-    fn test_leaflet_api_url_construction() {
-        let did = "desertthunder.bsky.social";
-        let api_url = format!(
-            "https://public.api.bsky.app/xrpc/com.atproto.repo.listRecords?repo={did}&collection=pub.leaflet.post&limit=50"
-        );
-        assert_eq!(
-            api_url,
-            "https://public.api.bsky.app/xrpc/com.atproto.repo.listRecords?repo=desertthunder.bsky.social&collection=pub.leaflet.post&limit=50"
-        );
+    fn test_leaflet_feed_url_construction() {
+        let base_url = "https://desertthunder.leaflet.pub";
+        let feed_url = format!("{}/rss", base_url.trim_end_matches('/'));
+        assert_eq!(feed_url, "https://desertthunder.leaflet.pub/rss");
     }
 
     #[test]

@@ -46,6 +46,27 @@ Both sections include native (host binary) instructions and optional Docker path
    ./target/release/pai serve -d /var/lib/pai/pai.db -a 127.0.0.1:8080
    ```
 
+### CORS Configuration for Self-Hosted Server
+
+The HTTP server supports CORS configuration via `config.toml`. Add a `[cors]` section:
+
+```toml
+[cors]
+# List of allowed origins for cross-origin requests
+allowed_origins = ["https://desertthunder.dev", "http://localhost:4321"]
+
+# Optional development key for local testing
+dev_key = "your-secret-dev-key"
+```
+
+CORS features:
+
+- **Exact matching**: `http://localhost:4321` only allows that specific origin
+- **Same-root-domain**: `https://desertthunder.dev` also allows `https://pai.desertthunder.dev`, `https://api.desertthunder.dev`, etc.
+- **Dev key**: Requests with `X-Local-Dev-Key` header matching the configured key bypass origin checks
+
+The PAI server handles CORS automatically - no additional proxy configuration needed. See [README.md](./README.md#cors-configuration) for details.
+
 ## nginx Deployment
 
 ### Host Setup
@@ -309,7 +330,65 @@ LEAFLET_URLS = "desertthunder:https://desertthunder.leaflet.pub,stormlightlabs:h
 
 # BearBlog publications (comma-separated id:url pairs)
 BEARBLOG_URLS = "desertthunder:https://desertthunder.bearblog.dev"
+
+# CORS configuration (optional)
+CORS_ALLOWED_ORIGINS = "https://desertthunder.dev,http://localhost:4321"
+CORS_DEV_KEY = "your-secret-dev-key"
 ```
+
+### CORS Configuration
+
+The Worker supports CORS to allow cross-origin requests from your web applications.
+
+#### Environment Variables
+
+Add to `wrangler.toml` under `[vars]`:
+
+- **CORS_ALLOWED_ORIGINS**: Comma-separated list of allowed origins
+    - Supports exact matching: `http://localhost:4321` only allows that exact origin
+    - Supports same-root-domain: `https://desertthunder.dev` also allows `https://pai.desertthunder.dev`, `https://api.desertthunder.dev`, etc.
+
+- **CORS_DEV_KEY**: Optional development key for local testing
+    - When set, requests with the `X-Local-Dev-Key` header matching this value bypass origin checking
+    - Useful for testing from different local ports during development
+
+#### Example Configuration
+
+```toml
+[vars]
+# Allow requests from your main domain and localhost for development
+CORS_ALLOWED_ORIGINS = "https://desertthunder.dev,http://localhost:4321"
+
+# Dev key for local Astro development
+CORS_DEV_KEY = "local-dev-secret-123"
+```
+
+#### Usage from JavaScript
+
+```javascript
+// Production request from https://desertthunder.dev
+fetch('https://pai.desertthunder.dev/api/feed', {
+  credentials: 'include'
+})
+
+// Development request from http://localhost:4321
+fetch('http://localhost:8787/api/feed', {
+  headers: {
+    'X-Local-Dev-Key': 'local-dev-secret-123'
+  }
+})
+```
+
+#### Same-Root-Domain Support
+
+When you configure `CORS_ALLOWED_ORIGINS = "https://desertthunder.dev"`:
+
+- ✓ `https://desertthunder.dev` (exact match)
+- ✓ `https://pai.desertthunder.dev` (subdomain)
+- ✓ `https://api.desertthunder.dev` (subdomain)
+- ✗ `https://evil.dev` (different root domain)
+
+This allows you to deploy the Worker to `pai.desertthunder.dev` and access it from your main site at `desertthunder.dev` without explicitly listing every subdomain.
 
 ### API Endpoints
 

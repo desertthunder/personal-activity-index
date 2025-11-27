@@ -1,15 +1,16 @@
 use crate::storage::SqliteStorage;
 
 use axum::{
-    extract::{Path, Query, State},
-    http::{header, StatusCode},
+    extract::{Path, Query, Request, State},
+    http::{header, HeaderValue, Method, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
 use chrono::DateTime;
 use owo_colors::OwoColorize;
-use pai_core::{Item, ListFilter, PaiError, SourceKind};
+use pai_core::{Config, CorsConfig, Item, ListFilter, PaiError, SourceKind};
 use rss::{Channel, ChannelBuilder, ItemBuilder};
 use serde::{Deserialize, Serialize};
 use std::{io, net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
@@ -18,8 +19,8 @@ use tokio::net::TcpListener;
 const DEFAULT_LIMIT: usize = 20;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Launches the HTTP server using the provided SQLite database path and address.
-pub fn serve(db_path: PathBuf, address: &str) -> Result<(), PaiError> {
+/// Launches the HTTP server using the provided config and address.
+pub fn serve(config: Config, db_path: PathBuf, address: &str) -> Result<(), PaiError> {
     let addr: SocketAddr = address
         .parse()
         .map_err(|e| PaiError::Config(format!("Invalid listen address '{address}': {e}")))?;
@@ -29,22 +30,27 @@ pub fn serve(db_path: PathBuf, address: &str) -> Result<(), PaiError> {
         .build()
         .map_err(PaiError::Io)?;
 
-    runtime.block_on(async move { run_server(db_path, addr).await })
+    runtime.block_on(async move { run_server(config, db_path, addr).await })
 }
 
-async fn run_server(db_path: PathBuf, addr: SocketAddr) -> Result<(), PaiError> {
+async fn run_server(config: Config, db_path: PathBuf, addr: SocketAddr) -> Result<(), PaiError> {
     let storage = SqliteStorage::new(&db_path)?;
     storage.verify_schema()?;
     drop(storage);
 
-    let state = AppState { db_path: Arc::new(db_path), start_time: Instant::now() };
+    let state =
+        AppState { db_path: Arc::new(db_path), start_time: Instant::now(), cors_config: Arc::new(config.cors.clone()) };
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/api/feed", get(feed_handler))
         .route("/api/item/:id", get(item_handler))
         .route("/status", get(status_handler))
         .route("/rss.xml", get(rss_handler))
-        .with_state(state);
+        .with_state(state.clone());
+
+    if !config.cors.allowed_origins.is_empty() || config.cors.dev_key.is_some() {
+        app = app.layer(middleware::from_fn_with_state(state.clone(), cors_middleware));
+    }
 
     let listener = TcpListener::bind(addr).await.map_err(PaiError::Io)?;
     let local_addr = listener.local_addr().map_err(PaiError::Io)?;
@@ -56,10 +62,81 @@ async fn run_server(db_path: PathBuf, addr: SocketAddr) -> Result<(), PaiError> 
         .map_err(|e| io::Error::other(e).into())
 }
 
+/// CORS middleware that validates origins and dev keys
+async fn cors_middleware(State(state): State<AppState>, request: Request, next: Next) -> Result<Response, StatusCode> {
+    let origin = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let dev_key = request
+        .headers()
+        .get("x-local-dev-key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let method = request.method().clone();
+
+    let is_authorized = if let Some(ref key) = dev_key {
+        state.cors_config.is_dev_key_valid(Some(key))
+    } else if let Some(ref origin_str) = origin {
+        state.cors_config.is_origin_allowed(origin_str)
+    } else {
+        true
+    };
+
+    if method == Method::OPTIONS {
+        if !is_authorized {
+            return Err(StatusCode::FORBIDDEN);
+        }
+
+        let mut response = Response::new(String::new().into());
+        if let Some(ref origin_str) = origin {
+            response.headers_mut().insert(
+                header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                HeaderValue::from_str(origin_str).unwrap_or(HeaderValue::from_static("*")),
+            );
+        }
+        response.headers_mut().insert(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET, POST, OPTIONS"),
+        );
+        response.headers_mut().insert(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static("Content-Type, X-Local-Dev-Key"),
+        );
+        response
+            .headers_mut()
+            .insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("3600"));
+        return Ok(response);
+    }
+
+    if origin.is_some() && !is_authorized {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let mut response = next.run(request).await;
+
+    if let Some(ref origin_str) = origin {
+        if is_authorized {
+            response.headers_mut().insert(
+                header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                HeaderValue::from_str(origin_str).unwrap_or(HeaderValue::from_static("*")),
+            );
+            response.headers_mut().insert(
+                header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
+                HeaderValue::from_static("true"),
+            );
+        }
+    }
+
+    Ok(response)
+}
+
 #[derive(Clone)]
 struct AppState {
     db_path: Arc<PathBuf>,
     start_time: Instant,
+    cors_config: Arc<CorsConfig>,
 }
 
 impl AppState {
@@ -352,7 +429,11 @@ mod tests {
     fn status_snapshot_reports_counts() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("status.db");
-        let state = AppState { db_path: Arc::new(db_path), start_time: Instant::now() };
+        let state = AppState {
+            db_path: Arc::new(db_path),
+            start_time: Instant::now(),
+            cors_config: Arc::new(pai_core::CorsConfig::default()),
+        };
 
         let storage = state.open_storage().unwrap();
         let now = Utc::now().to_rfc3339();

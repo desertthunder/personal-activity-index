@@ -69,10 +69,85 @@ Configuration is loaded from `$XDG_CONFIG_HOME/pai/config.toml` or `$HOME/.confi
 
 See [config.example.toml](./config.example.toml) for a complete example with all available options.
 
+<details>
+<summary>
+CORS Configuration
+</summary>
+
+Both the HTTP server and Cloudflare Worker support CORS configuration to allow cross-origin requests from your web applications.
+
+### HTTP Server (config.toml)
+
+  Add a `[cors]` section to your config file:
+
+  ```toml
+  [cors]
+  allowed_origins = ["https://desertthunder.dev", "http://localhost:4321"]
+  dev_key = "your-secret-dev-key"
+  ```
+
+  Configuration options:
+
+- **allowed_origins**: List of allowed origins. Supports:
+    - Exact match: `http://localhost:4321` only allows that exact origin
+    - Same-root-domain: `https://desertthunder.dev` also allows `https://pai.desertthunder.dev`, `https://api.desertthunder.dev`, etc.
+- **dev_key**: Optional development key for local testing.
+    When set, requests with the `X-Local-Dev-Key` header matching this value are allowed regardless of origin.
+
+### Cloudflare Worker (Environment Variables)
+
+  Configure CORS via environment variables in `wrangler.toml`:
+
+  ```toml
+  [vars]
+  CORS_ALLOWED_ORIGINS = "https://desertthunder.dev,http://localhost:4321"
+  CORS_DEV_KEY = "your-secret-dev-key"
+  ```
+
+- **CORS_ALLOWED_ORIGINS**: Comma-separated list of allowed origins
+- **CORS_DEV_KEY**: Optional development key (same behavior as HTTP server)
+
+#### Local Development with X-LOCAL-DEV-KEY
+
+For local development from Astro or other frameworks:
+
+1. Add a `dev_key` to your CORS config:
+
+    ```toml
+    [cors]
+    allowed_origins = ["http://localhost:4321"]
+    dev_key = "local-dev-secret-123"
+    ```
+
+2. Include the header in your API requests:
+
+    ```javascript
+    fetch('http://localhost:8080/api/feed', {
+      headers: {
+        'X-Local-Dev-Key': 'local-dev-secret-123'
+      }
+    })
+    ```
+
+  The dev key header bypasses origin checking, useful for testing from different local ports or during development.
+
+#### Same-Root-Domain Support
+
+  If you configure `allowed_origins = ["https://desertthunder.dev"]`, requests from:
+
+- `https://desertthunder.dev` ✓ (exact match)
+- `https://pai.desertthunder.dev` ✓ (subdomain of allowed root)
+- `https://api.desertthunder.dev` ✓ (subdomain of allowed root)
+- `https://evil.dev` ✗ (different root domain)
+
+  This allows you to deploy the API at `pai.desertthunder.dev` and access it from your main site at `desertthunder.dev` without explicitly listing every subdomain.
+
+</details>
+
 ## Documentation
 
 - CLI synopsis: `pai -h`, `pai <command> -h`, or `pai man` for the generated `pai(1)` page.
-- `pai man --install [--install-dir DIR]` copies `pai.1` into a MANPATH directory (defaults to `~/.local/share/man/man1`) so `man pai` works like any other UNIX tool.
+- `pai man --install [--install-dir DIR]` copies `pai.1` into a MANPATH directory (defaults to `~/.local/share/man/man1`)
 - Database schema and config reference: [config.example.toml](./config.example.toml).
 - Deployment topologies: [DEPLOYMENT.md](./DEPLOYMENT.md).
 

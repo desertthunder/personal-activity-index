@@ -132,7 +132,9 @@ fn handle_export(db_path: Option<PathBuf>, opts: ExportOpts) -> Result<(), PaiEr
 
 fn handle_serve(db_path: Option<PathBuf>, address: String) -> Result<(), PaiError> {
     let db_path = paths::resolve_db_path(db_path)?;
-    pai_server::serve(db_path, &address)
+    let config_path = paths::resolve_config_dir(None)?.join("config.toml");
+    let config = if config_path.exists() { Config::from_file(&config_path)? } else { Config::default() };
+    pai_server::serve(config, db_path, &address)
 }
 
 fn handle_db_check(db_path: Option<PathBuf>) -> Result<(), PaiError> {

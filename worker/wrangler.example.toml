@@ -36,6 +36,16 @@ LEAFLET_URLS = "desertthunder:https://desertthunder.leaflet.pub,stormlightlabs:h
 # Format: "id1:https://blog1.bearblog.dev,id2:https://blog2.bearblog.dev"
 BEARBLOG_URLS = "desertthunder:https://desertthunder.bearblog.dev"
 
+# CORS configuration (optional)
+# Comma-separated list of allowed origins for cross-origin requests
+# Supports exact match and same-root-domain matching
+# Example: "https://desertthunder.dev" allows pai.desertthunder.dev, api.desertthunder.dev, etc.
+CORS_ALLOWED_ORIGINS = "https://desertthunder.dev,http://localhost:4321"
+
+# Optional development key for local testing
+# When set, requests with X-Local-Dev-Key header matching this value are allowed
+CORS_DEV_KEY = "your-secret-dev-key-change-this"
+
 # Optional: Logging level
 # LOG_LEVEL = "info"
 

@@ -1,4 +1,4 @@
-use pai_core::{Item, ListFilter, SourceKind};
+use pai_core::{CorsConfig, Item, ListFilter, SourceKind};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::JsValue;
 use worker::*;
@@ -106,8 +106,20 @@ struct StatusResponse {
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+    let cors_config = load_cors_config(&env);
+
+    if req.method() == Method::Options {
+        return handle_preflight(&req, &cors_config);
+    }
+
+    if !is_cors_authorized(&req, &cors_config) {
+        return Response::error("Forbidden", 403);
+    }
+
+    let origin = req.headers().get("Origin").ok().flatten();
+
     let router = Router::new();
-    router
+    let mut response = router
         .get_async("/", |req, _ctx| async move {
             let url = req
                 .url()
@@ -181,7 +193,14 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             Response::from_json(&status)
         })
         .run(req, env)
-        .await
+        .await?;
+
+    if let Some(origin_str) = origin {
+        response.headers_mut().set("Access-Control-Allow-Origin", &origin_str)?;
+        response.headers_mut().set("Access-Control-Allow-Credentials", "true")?;
+    }
+
+    Ok(response)
 }
 
 #[event(scheduled)]
@@ -360,6 +379,54 @@ fn load_sync_config(env: &Env) -> Result<SyncConfig> {
     };
 
     Ok(SyncConfig { substack, bluesky, leaflet, bearblog })
+}
+
+/// Load CORS configuration from environment variables
+fn load_cors_config(env: &Env) -> CorsConfig {
+    let allowed_origins = env
+        .var("CORS_ALLOWED_ORIGINS")
+        .ok()
+        .map(|origins| origins.to_string().split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
+
+    let dev_key = env.var("CORS_DEV_KEY").ok().map(|k| k.to_string());
+
+    CorsConfig { allowed_origins, dev_key }
+}
+
+/// Check if request is authorized for CORS
+fn is_cors_authorized(req: &Request, cors_config: &CorsConfig) -> bool {
+    if let Ok(Some(key)) = req.headers().get("X-Local-Dev-Key") {
+        if cors_config.is_dev_key_valid(Some(&key)) {
+            return true;
+        }
+    }
+
+    if let Ok(Some(origin_str)) = req.headers().get("Origin") {
+        return cors_config.is_origin_allowed(&origin_str);
+    }
+
+    true
+}
+
+/// Handle preflight OPTIONS requests
+fn handle_preflight(req: &Request, cors_config: &CorsConfig) -> Result<Response> {
+    if !is_cors_authorized(req, cors_config) {
+        return Response::error("Forbidden", 403);
+    }
+
+    let mut response = Response::empty()?;
+    let response_headers = response.headers_mut();
+
+    if let Ok(Some(origin)) = req.headers().get("Origin") {
+        response_headers.set("Access-Control-Allow-Origin", &origin)?;
+    }
+
+    response_headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")?;
+    response_headers.set("Access-Control-Allow-Headers", "Content-Type, X-Local-Dev-Key")?;
+    response_headers.set("Access-Control-Max-Age", "3600")?;
+
+    Ok(response)
 }
 
 async fn sync_substack(config: &SubstackConfig, db: &D1Database) -> Result<usize> {

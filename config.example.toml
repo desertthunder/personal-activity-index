@@ -19,6 +19,17 @@ worker_name = "personal-activity-index"
 d1_binding = "DB"
 database_name = "personal_activity_db"
 
+# CORS configuration for HTTP server (optional)
+[cors]
+# List of allowed origins for cross-origin requests
+# Supports exact match and same-root-domain matching
+# Example: "https://desertthunder.dev" allows pai.desertthunder.dev, api.desertthunder.dev, etc.
+allowed_origins = ["https://desertthunder.dev", "http://localhost:4321"]
+
+# Optional development key for local testing
+# When set, requests with X-Local-Dev-Key header matching this value are allowed
+dev_key = "your-secret-dev-key-change-this"
+
 # Substack RSS feed source
 [sources.substack]
 enabled = true

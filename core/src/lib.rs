@@ -193,6 +193,91 @@ pub struct SourcesConfig {
     pub bearblog: Vec<BearBlogConfig>,
 }
 
+/// CORS configuration for the HTTP server and Worker
+///
+/// Supports same-root-domain CORS (e.g., pai.desertthunder.dev from desertthunder.dev)
+/// and local development with a dev key header.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct CorsConfig {
+    /// List of allowed origins (exact match or same-root-domain)
+    /// Example: ["https://desertthunder.dev", "http://localhost:4321"]
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+
+    /// Optional development key for local development
+    /// When set, requests with X-LOCAL-DEV-KEY header matching this value are allowed
+    pub dev_key: Option<String>,
+}
+
+impl CorsConfig {
+    /// Check if an origin is allowed based on exact match or same-root-domain logic.
+    ///
+    /// Same-root-domain means extracting the root domain (last two parts) from both
+    /// the origin and allowed origins, and checking for a match.
+    ///
+    /// Examples:
+    /// - https://pai.desertthunder.dev is allowed if https://desertthunder.dev is in allowed_origins
+    /// - http://localhost:4321 requires exact match
+    pub fn is_origin_allowed(&self, origin: &str) -> bool {
+        if self.allowed_origins.is_empty() {
+            return false;
+        }
+
+        let origin_domain = extract_domain(origin);
+
+        for allowed in &self.allowed_origins {
+            if origin == allowed {
+                return true;
+            }
+
+            let allowed_domain = extract_domain(allowed);
+            if let (Some(origin_root), Some(allowed_root)) = (
+                extract_root_domain(&origin_domain),
+                extract_root_domain(&allowed_domain),
+            ) {
+                if origin_root == allowed_root {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Validate if a dev key matches the configured dev key
+    pub fn is_dev_key_valid(&self, key: Option<&str>) -> bool {
+        match (&self.dev_key, key) {
+            (Some(config_key), Some(request_key)) => config_key == request_key,
+            _ => false,
+        }
+    }
+}
+
+/// Extract domain from URL (removes protocol and path)
+fn extract_domain(url: &str) -> String {
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Extract root domain (last two parts of domain)
+/// Example: "pai.desertthunder.dev" -> Some("desertthunder.dev")
+/// Example: "localhost" -> None (single part)
+fn extract_root_domain(domain: &str) -> Option<String> {
+    let parts: Vec<&str> = domain.split('.').collect();
+    if parts.len() >= 2 {
+        Some(format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1]))
+    } else {
+        None
+    }
+}
+
 /// Configuration for all sources
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct Config {
@@ -202,6 +287,8 @@ pub struct Config {
     pub deployment: DeploymentConfig,
     #[serde(default)]
     pub sources: SourcesConfig,
+    #[serde(default)]
+    pub cors: CorsConfig,
 }
 
 impl Config {
@@ -458,5 +545,117 @@ base_url = "https://test.substack.com"
         let config = Config::from_str(toml).unwrap();
         let substack = config.sources.substack.as_ref().unwrap();
         assert!(!substack.enabled);
+    }
+
+    #[test]
+    fn cors_config_exact_match() {
+        let cors = CorsConfig {
+            allowed_origins: vec![
+                "https://desertthunder.dev".to_string(),
+                "http://localhost:4321".to_string(),
+            ],
+            dev_key: None,
+        };
+        assert!(cors.is_origin_allowed("https://desertthunder.dev"));
+        assert!(cors.is_origin_allowed("http://localhost:4321"));
+        assert!(!cors.is_origin_allowed("https://evil.com"));
+    }
+
+    #[test]
+    fn cors_config_same_root_domain() {
+        let cors = CorsConfig { allowed_origins: vec!["https://desertthunder.dev".to_string()], dev_key: None };
+        assert!(cors.is_origin_allowed("https://pai.desertthunder.dev"));
+        assert!(cors.is_origin_allowed("https://api.desertthunder.dev"));
+        assert!(cors.is_origin_allowed("https://desertthunder.dev"));
+        assert!(!cors.is_origin_allowed("https://evil.dev"));
+    }
+
+    #[test]
+    fn cors_config_localhost_requires_exact_match() {
+        let cors = CorsConfig { allowed_origins: vec!["http://localhost:4321".to_string()], dev_key: None };
+        assert!(cors.is_origin_allowed("http://localhost:4321"));
+        assert!(!cors.is_origin_allowed("http://localhost:3000"));
+    }
+
+    #[test]
+    fn cors_config_empty_origins_denies_all() {
+        let cors = CorsConfig { allowed_origins: vec![], dev_key: None };
+        assert!(!cors.is_origin_allowed("https://desertthunder.dev"));
+        assert!(!cors.is_origin_allowed("http://localhost:4321"));
+    }
+
+    #[test]
+    fn cors_config_dev_key_valid() {
+        let cors = CorsConfig { allowed_origins: vec![], dev_key: Some("secret-dev-key".to_string()) };
+        assert!(cors.is_dev_key_valid(Some("secret-dev-key")));
+        assert!(!cors.is_dev_key_valid(Some("wrong-key")));
+        assert!(!cors.is_dev_key_valid(None));
+    }
+
+    #[test]
+    fn cors_config_dev_key_none() {
+        let cors = CorsConfig { allowed_origins: vec![], dev_key: None };
+        assert!(!cors.is_dev_key_valid(Some("any-key")));
+        assert!(!cors.is_dev_key_valid(None));
+    }
+
+    #[test]
+    fn extract_domain_https() {
+        assert_eq!(
+            super::extract_domain("https://desertthunder.dev/path"),
+            "desertthunder.dev"
+        );
+        assert_eq!(
+            super::extract_domain("https://pai.desertthunder.dev"),
+            "pai.desertthunder.dev"
+        );
+    }
+
+    #[test]
+    fn extract_domain_http() {
+        assert_eq!(super::extract_domain("http://localhost:4321/api"), "localhost");
+        assert_eq!(super::extract_domain("http://example.com"), "example.com");
+    }
+
+    #[test]
+    fn extract_root_domain_multi_level() {
+        assert_eq!(
+            super::extract_root_domain("pai.desertthunder.dev"),
+            Some("desertthunder.dev".to_string())
+        );
+        assert_eq!(
+            super::extract_root_domain("api.example.com"),
+            Some("example.com".to_string())
+        );
+        assert_eq!(
+            super::extract_root_domain("a.b.c.example.org"),
+            Some("example.org".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_root_domain_single_part() {
+        assert_eq!(super::extract_root_domain("localhost"), None);
+    }
+
+    #[test]
+    fn extract_root_domain_two_parts() {
+        assert_eq!(
+            super::extract_root_domain("example.com"),
+            Some("example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn config_parse_cors() {
+        let toml = r#"
+[cors]
+allowed_origins = ["https://desertthunder.dev", "http://localhost:4321"]
+dev_key = "my-dev-key"
+"#;
+        let config = Config::from_str(toml).unwrap();
+        assert_eq!(config.cors.allowed_origins.len(), 2);
+        assert_eq!(config.cors.allowed_origins[0], "https://desertthunder.dev");
+        assert_eq!(config.cors.dev_key, Some("my-dev-key".to_string()));
     }
 }
